@@ -38,6 +38,7 @@ use crate::sprites;
 use crate::storm;
 use crate::switch::{CompleteSwitch};
 use crate::text;
+use crate::util::ExecStateExt;
 use crate::units;
 use crate::vtables::{self, Vtables};
 use crate::x86_64_globals;
@@ -1281,6 +1282,34 @@ impl<'e, E: ExecutionState<'e>> Analysis<'e, E> {
 
     pub fn pathing(&mut self) -> Option<Operand<'e>> {
         self.enter(AnalysisCache::pathing)
+    }
+
+    pub fn path_next_offset(&self) -> u64 {
+        E::struct_layouts().path_next()
+    }
+
+    pub fn path_full_long_path_size_offset(&self) -> u64 {
+        E::struct_layouts().path_full_long_path_size()
+    }
+
+    pub fn path_long_path_size_offset(&self) -> u64 {
+        E::struct_layouts().path_long_path_size()
+    }
+
+    pub fn path_current_long_path_index_offset(&self) -> u64 {
+        E::struct_layouts().path_current_long_path_index()
+    }
+
+    pub fn path_short_path_size_offset(&self) -> u64 {
+        E::struct_layouts().path_short_path_size()
+    }
+
+    pub fn path_current_short_path_index_offset(&self) -> u64 {
+        E::struct_layouts().path_current_short_path_index()
+    }
+
+    pub fn path_short_path_offset(&self) -> u64 {
+        E::struct_layouts().path_short_path()
     }
 
     pub fn command_user(&mut self) -> Option<Operand<'e>> {

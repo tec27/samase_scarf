@@ -181,6 +181,34 @@ impl StructLayouts {
         self.pair(0x100, 0x188)
     }
 
+    pub const fn path_next(self) -> u64 {
+        self.pair(0x4, 0x4)
+    }
+
+    pub const fn path_full_long_path_size(self) -> u64 {
+        self.pair(0x1b, 0x1b)
+    }
+
+    pub const fn path_long_path_size(self) -> u64 {
+        self.pair(0x1c, 0x1c)
+    }
+
+    pub const fn path_current_long_path_index(self) -> u64 {
+        self.pair(0x1d, 0x1d)
+    }
+
+    pub const fn path_short_path_size(self) -> u64 {
+        self.pair(0x1e, 0x1e)
+    }
+
+    pub const fn path_current_short_path_index(self) -> u64 {
+        self.pair(0x1f, 0x1f)
+    }
+
+    pub const fn path_short_path(self) -> u64 {
+        self.pair(0x20, 0x20)
+    }
+
     pub const fn unit_lockdown_timer(self) -> u64 {
         self.pair(0x117, 0x1a3)
     }
