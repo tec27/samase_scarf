@@ -592,6 +592,8 @@ results! {
         CancelUnit => cancel_unit => cache_cancel_unit_finding,
         RandSynced => rand_synced => cache_rng,
         StormReceiveTurns => storm_receive_turns => cache_storm_turn_globals,
+        ApplyPendingPlayerLeaves => apply_pending_player_leaves =>
+            cache_apply_pending_player_leaves,
     }
 }
 
@@ -5361,6 +5363,16 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
                 Some(([result.storm_receive_turns],
                     [result.storm_turn_base, result.storm_turn_min_interval,
                      result.storm_turn_lag_threshold]))
+            })
+    }
+
+    fn cache_apply_pending_player_leaves(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        self.cache_many(&[ApplyPendingPlayerLeaves], &[],
+            |s| {
+                let receive_storm_turns = s.receive_storm_turns(actx)?;
+                let result = commands::apply_pending_player_leaves(actx, receive_storm_turns);
+                Some(([result], []))
             })
     }
 
