@@ -44,6 +44,12 @@ pub(crate) struct OutgoingCommands<'e> {
     pub outgoing_command_length: Option<Operand<'e>>,
 }
 
+pub(crate) struct TurnTimer<'e, Va: VirtualAddressTrait> {
+    pub advance_turn_timer_and_step_network: Option<Va>,
+    pub turn_timer_accumulator: Option<Operand<'e>>,
+    pub network_waiting_for_turns: Option<Operand<'e>>,
+}
+
 pub(crate) struct PrintText<Va: VirtualAddressTrait> {
     pub print_text: Option<Va>,
     pub add_to_replay_data: Option<Va>,
@@ -773,6 +779,139 @@ impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FindBuiltinTurnLa
             if let Some(global) = global {
                 *self.result = Some(global);
                 ctrl.end_analysis();
+            }
+        }
+    }
+}
+
+/// Finds `game_frame_count`.
+///
+/// `step_network` increments it once per executed turn (`game_frame_count += 1`); it is the only
+/// global that is self-incremented by 1 in `step_network`.
+pub(crate) fn game_frame_count<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    step_network: E::VirtualAddress,
+) -> Option<Operand<'e>> {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let mut result = None;
+    let mut analyzer = FindGameFrameCount::<E> {
+        result: &mut result,
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, step_network);
+    analysis.analyze(&mut analyzer);
+    result
+}
+
+struct FindGameFrameCount<'a, 'e, E: ExecutionState<'e>> {
+    result: &'a mut Option<Operand<'e>>,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FindGameFrameCount<'a, 'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        if let Operation::Move(ref dest, val) = *op {
+            if let DestOperand::Memory(mem) = dest {
+                if mem.size == MemAccessSize::Mem32 {
+                    let dest = ctrl.resolve_mem(mem);
+                    if dest.is_global() {
+                        let dest_op = ctrl.ctx().memory(&dest);
+                        let val = ctrl.resolve(val).unwrap_and_mask();
+                        if val.if_arithmetic_add_const(1) == Some(dest_op) {
+                            *self.result = Some(dest_op);
+                            ctrl.end_analysis();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Finds `advance_turn_timer_and_step_network` and the per-turn globals it drives.
+///
+/// It is the caller of `step_network` whose body drains `turn_timer_accumulator -= 0x3e8` (1000
+/// µs/tick). Within it:
+///   turn_timer_accumulator -= 1000; ... if (step_network() == 0) { network_waiting_for_turns = 1; }
+///   ... if (turns_ready_this_step.b != 0) *out = 1;   // advance one sim frame
+/// `turns_ready_this_step` is the only byte global tested-but-never-written here (in contrast to
+/// `network_waiting_for_turns`, which is also written).
+pub(crate) fn analyze_turn_timer<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    step_network: E::VirtualAddress,
+    functions: &FunctionFinder<'_, 'e, E>,
+) -> TurnTimer<'e, E::VirtualAddress> {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let mut result = TurnTimer {
+        advance_turn_timer_and_step_network: None,
+        turn_timer_accumulator: None,
+        network_waiting_for_turns: None,
+    };
+    let funcs = functions.functions();
+    let callers = functions.find_callers(actx, step_network);
+    for caller in callers {
+        let found = entry_of_until(binary, &funcs, caller, |entry| {
+            let mut analyzer = AnalyzeTurnTimer::<E> {
+                turn_timer_accumulator: None,
+                network_waiting_for_turns: None,
+                has_drain: false,
+                phantom: Default::default(),
+            };
+            let mut analysis = FuncAnalysis::new(binary, ctx, entry);
+            analysis.analyze(&mut analyzer);
+            if analyzer.has_drain {
+                EntryOf::Ok((analyzer.turn_timer_accumulator,
+                    analyzer.network_waiting_for_turns))
+            } else {
+                EntryOf::Retry
+            }
+        }).into_option_with_entry();
+        if let Some((entry, (tta, nwft))) = found {
+            result.advance_turn_timer_and_step_network = Some(entry);
+            result.turn_timer_accumulator = tta;
+            result.network_waiting_for_turns = nwft;
+            break;
+        }
+    }
+    result
+}
+
+struct AnalyzeTurnTimer<'e, E: ExecutionState<'e>> {
+    turn_timer_accumulator: Option<Operand<'e>>,
+    network_waiting_for_turns: Option<Operand<'e>>,
+    has_drain: bool,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for AnalyzeTurnTimer<'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        let ctx = ctrl.ctx();
+        if let Operation::Move(ref dest, val) = *op {
+            if let DestOperand::Memory(mem) = dest {
+                let dest = ctrl.resolve_mem(mem);
+                if dest.is_global() {
+                    if mem.size == MemAccessSize::Mem32 {
+                        let dest_op = ctx.memory(&dest);
+                        let value = ctrl.resolve(val).unwrap_and_mask();
+                        // turn_timer_accumulator -= 0x3e8 (drains 1000 µs/tick)
+                        if value.if_arithmetic_sub_const(0x3e8) == Some(dest_op) {
+                            self.has_drain = true;
+                            self.turn_timer_accumulator = Some(dest_op);
+                        }
+                    }
+                    // network_waiting_for_turns = 1 (stall flag)
+                    if ctrl.resolve(val).if_constant() == Some(1) &&
+                        self.network_waiting_for_turns.is_none()
+                    {
+                        self.network_waiting_for_turns = Some(ctx.memory(&dest));
+                    }
+                }
             }
         }
     }
