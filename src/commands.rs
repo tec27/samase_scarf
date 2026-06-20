@@ -1267,6 +1267,52 @@ impl<'a, 'b, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for
     }
 }
 
+/// Finds `apply_pending_player_leaves`.
+///
+/// `receive_storm_turns`, on a successful receive, opens the synced-RNG window and runs the leave
+/// pass:
+///   orig = set_rng_enable(1);
+///   apply_pending_player_leaves();
+///   set_rng_enable(orig);
+/// So it is the call immediately after the `set_rng_enable(1)` call (the only call there taking a
+/// literal 1), which is a version-stable position.
+pub(crate) fn apply_pending_player_leaves<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    receive_storm_turns: E::VirtualAddress,
+) -> Option<E::VirtualAddress> {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let mut result = None;
+    let mut analyzer = FindApplyPendingLeaves::<E> {
+        result: &mut result,
+        after_rng_enable: false,
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, receive_storm_turns);
+    analysis.analyze(&mut analyzer);
+    result
+}
+
+struct FindApplyPendingLeaves<'a, 'e, E: ExecutionState<'e>> {
+    result: &'a mut Option<E::VirtualAddress>,
+    after_rng_enable: bool,
+}
+
+impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FindApplyPendingLeaves<'a, 'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        if let Operation::Call(dest) = *op {
+            if self.after_rng_enable {
+                // The call right after set_rng_enable(1); set_rng_enable(orig) follows it.
+                *self.result = ctrl.resolve_va(dest);
+                ctrl.end_analysis();
+            } else if ctrl.resolve_arg(0).if_constant() == Some(1) {
+                self.after_rng_enable = true;
+            }
+        }
+    }
+}
+
 pub(crate) fn analyze_process_fn_switch<'e, E: ExecutionState<'e>>(
     actx: &AnalysisCtx<'e, E>,
     func: E::VirtualAddress,

@@ -36,6 +36,7 @@ ai_unit_was_hit: 00626330
 ai_update_attack_target: 0057b270
 ai_update_building_placement_state: 00752470
 anim_asset_change_cb: 0055ad10
+apply_pending_player_leaves: 0071f480
 attack_unit: 0057e820
 building_placement_lclick: 00738ee0
 building_placement_rclick: 006a2e90
