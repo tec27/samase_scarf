@@ -591,6 +591,7 @@ results! {
             cache_check_resources_for_building,
         CancelUnit => cancel_unit => cache_cancel_unit_finding,
         RandSynced => rand_synced => cache_rng,
+        StormReceiveTurns => storm_receive_turns => cache_storm_turn_globals,
     }
 }
 
@@ -904,6 +905,9 @@ results! {
         SnetPlayerList => snet_player_list => cache_snet_recv_packets,
         CursorScaleFactor => cursor_scale_factor,
         MinimapColorMode => minimap_color_mode => cache_minimap_event_handler,
+        StormTurnBase => storm_turn_base => cache_storm_turn_globals,
+        StormTurnMinInterval => storm_turn_min_interval => cache_storm_turn_globals,
+        StormTurnLagThreshold => storm_turn_lag_threshold => cache_storm_turn_globals,
     }
 }
 
@@ -5342,6 +5346,24 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
                 Some(([result.cancel_unit], []))
             })
     }
+    fn receive_storm_turns(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<E::VirtualAddress> {
+        self.cache_many_addr(AddressAnalysis::ReceiveStormTurns, |s| s.cache_step_network(actx))
+    }
+
+    fn cache_storm_turn_globals(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        use OperandAnalysis::*;
+        self.cache_many(&[StormReceiveTurns],
+            &[StormTurnBase, StormTurnMinInterval, StormTurnLagThreshold],
+            |s| {
+                let receive_storm_turns = s.receive_storm_turns(actx)?;
+                let result = commands::storm_turn_globals(actx, receive_storm_turns);
+                Some(([result.storm_receive_turns],
+                    [result.storm_turn_base, result.storm_turn_min_interval,
+                     result.storm_turn_lag_threshold]))
+            })
+    }
+
 }
 
 pub struct DatPatchesDebug<'e, Va: VirtualAddress> {
