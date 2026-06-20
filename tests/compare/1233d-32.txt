@@ -210,6 +210,7 @@ rand_synced: 00730bd0
 read_whole_mpq_file: 00942680
 read_whole_mpq_file2: 00942590
 receive_storm_turns: 00719ff0
+recompute_turn_durations: 006c2d90
 refresh_ui: 00784dd0
 remove_from_client_selection: 0059b7a0
 remove_from_selections: 007679c0
@@ -573,6 +574,7 @@ tooltip_draw_func: Mem32[ed0e74]
 tranwire_ddsgrp: 10de370
 tranwire_grp: Mem32[10de358]
 trigger_current_player: Mem32[10e54a0]
+turn_duration_by_speed: 10a427c
 ui_consoles: 10dee30
 unique_command_user: Mem32[e5a4a4]
 unit_count: Mem32[ed0ba8]
