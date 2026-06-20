@@ -1698,7 +1698,8 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 LastFreePlacementRect | TilesetIndexedMapTiles | Vx4MapTiles | RepulseState |
                 TerrainFramebuf | StatportVideos | StatportTalkingPortraitActive |
                 StatportVideoId | NgdpEnabled | MinimapColorMode | OutgoingCommandLength |
-                BuiltinTurnLatency | GameFrameCount =>
+                BuiltinTurnLatency | GameFrameCount | StormTurnBase | StormTurnMinInterval |
+                StormTurnLagThreshold =>
             {
                 check_global_opt(result, binary, op.name());
             }
