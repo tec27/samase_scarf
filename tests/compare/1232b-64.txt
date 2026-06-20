@@ -488,6 +488,8 @@ observer_ui: Mem64[140cf0e98]
 on_clip_cursor_end: Mem64[140ed80e8]
 order_timer_reset_counter: Mem32[140ce92f4]
 original_chk_player_types: 140f01020
+outgoing_command_buffer: 140f02b50
+outgoing_command_length: Mem32[140f02b44]
 palette_set: 140f3fdb0
 path_array: Mem64[140f121a8]
 pathing: Mem64[140f08070]
