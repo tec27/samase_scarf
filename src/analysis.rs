@@ -594,6 +594,8 @@ results! {
         RandSynced => rand_synced => cache_rng,
         FlushOutgoingCommandTurn => flush_outgoing_command_turn => cache_flush_outgoing_command_turn,
         SendTurnMessage => send_turn_message => cache_send_turn_message,
+        FlushLocalTurnsToLatencyDepth => flush_local_turns_to_latency_depth =>
+            cache_flush_local_turns,
     }
 }
 
@@ -5427,6 +5429,27 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
                 let result = commands::send_turn_message(actx, flush, length);
                 Some(([result], []))
             })
+    }
+
+    fn cache_flush_local_turns(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        self.cache_many(&[FlushLocalTurnsToLatencyDepth], &[],
+            |s| {
+                let step_network = s.step_network(actx)?;
+                let flush = s.flush_outgoing_command_turn(actx)?;
+                let buffer = s.outgoing_command_buffer(actx)?;
+                let result = commands::flush_local_turns_to_latency_depth(
+                    actx, step_network, flush, buffer);
+                Some(([result], []))
+            })
+    }
+
+    fn flush_local_turns_to_latency_depth(
+        &mut self,
+        actx: &AnalysisCtx<'e, E>,
+    ) -> Option<E::VirtualAddress> {
+        self.cache_many_addr(AddressAnalysis::FlushLocalTurnsToLatencyDepth,
+                             |s| s.cache_flush_local_turns(actx))
     }
 }
 

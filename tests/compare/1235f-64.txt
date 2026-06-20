@@ -100,6 +100,7 @@ find_unit_for_click: 1404202e0
 finish_unit_post: 1401b85d0
 finish_unit_pre: 1401b88e0
 flingy_update_target_dir: 140181260
+flush_local_turns_to_latency_depth: 14039a600
 flush_outgoing_command_turn: 14039e330
 foliage_mark_area_for_resource: 1402f7590
 font_cache_render_ascii: 1405fd2d0

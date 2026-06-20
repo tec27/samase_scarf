@@ -565,6 +565,119 @@ impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FindSendTurnMessa
     }
 }
 
+/// Finds `flush_local_turns_to_latency_depth` (the latency pipe loop).
+///
+///   outstanding = get_outstanding_turn_count();
+///   target = builtin_turn_latency;
+///   if (sync_active) target += net_user_latency;
+///   while (outstanding < target) flush_outgoing_command_turn(++outstanding);
+///
+/// `step_network` calls it once per turn after the receive pass. Among `step_network`'s direct
+/// call targets it is identified by reaching `flush_outgoing_command_turn` — either by calling it,
+/// or (on builds that inline flush into the loop) by writing the keep-alive seed `buffer[0] = 5`
+/// itself. That signature doesn't depend on `net_user_latency` (absent on old builds).
+pub(crate) fn flush_local_turns_to_latency_depth<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    step_network: E::VirtualAddress,
+    flush_outgoing_command_turn: E::VirtualAddress,
+    outgoing_command_buffer: Operand<'e>,
+) -> Option<E::VirtualAddress> {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let bump = &actx.bump;
+    let buffer_addr = outgoing_command_buffer.if_constant()?;
+
+    let mut collector = CollectCallTargets::<E> {
+        targets: bumpvec_with_capacity(0x20, bump),
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, step_network);
+    analysis.analyze(&mut collector);
+    let targets = collector.targets;
+
+    for &target in targets.iter() {
+        if target == flush_outgoing_command_turn {
+            continue;
+        }
+        let mut analyzer = IsFlushLocalTurns::<E> {
+            flush: flush_outgoing_command_turn,
+            buffer_addr,
+            found: false,
+            limit: 0x200,
+            phantom: Default::default(),
+        };
+        let mut analysis = FuncAnalysis::new(binary, ctx, target);
+        analysis.analyze(&mut analyzer);
+        if analyzer.found {
+            return Some(target);
+        }
+    }
+    None
+}
+
+struct CollectCallTargets<'b, 'e, E: ExecutionState<'e>> {
+    targets: BumpVec<'b, E::VirtualAddress>,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'b, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for CollectCallTargets<'b, 'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        if let Operation::Call(dest) = *op {
+            if let Some(dest) = ctrl.resolve_va(dest) {
+                if !self.targets.contains(&dest) {
+                    self.targets.push(dest);
+                }
+            }
+        }
+    }
+}
+
+/// Reports whether the analyzed function reaches `flush_outgoing_command_turn`: either by calling
+/// it, or (when flush is inlined) by writing the keep-alive seed `buffer[0] = 5`.
+struct IsFlushLocalTurns<'e, E: ExecutionState<'e>> {
+    flush: E::VirtualAddress,
+    buffer_addr: u64,
+    found: bool,
+    limit: u32,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for IsFlushLocalTurns<'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        match self.limit.checked_sub(1) {
+            Some(s) => self.limit = s,
+            None => {
+                ctrl.end_analysis();
+                return;
+            }
+        }
+        match *op {
+            Operation::Call(dest) => {
+                if ctrl.resolve_va(dest) == Some(self.flush) {
+                    self.found = true;
+                    ctrl.end_analysis();
+                }
+            }
+            Operation::Move(ref dest, val) => {
+                if let DestOperand::Memory(mem) = dest {
+                    let dest = ctrl.resolve_mem(mem);
+                    if dest.if_constant_address() == Some(self.buffer_addr) &&
+                        ctrl.resolve(val).if_constant() == Some(5)
+                    {
+                        self.found = true;
+                        ctrl.end_analysis();
+                    }
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
 pub(crate) fn analyze_process_fn_switch<'e, E: ExecutionState<'e>>(
     actx: &AnalysisCtx<'e, E>,
     func: E::VirtualAddress,
