@@ -593,6 +593,7 @@ results! {
         CancelUnit => cancel_unit => cache_cancel_unit_finding,
         RandSynced => rand_synced => cache_rng,
         FlushOutgoingCommandTurn => flush_outgoing_command_turn => cache_flush_outgoing_command_turn,
+        SendTurnMessage => send_turn_message => cache_send_turn_message,
     }
 }
 
@@ -5405,6 +5406,25 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
                 let funcs = s.function_finder();
                 let result = commands::flush_outgoing_command_turn(
                     actx, send_command, buffer, length, &funcs);
+                Some(([result], []))
+            })
+    }
+
+    fn flush_outgoing_command_turn(
+        &mut self,
+        actx: &AnalysisCtx<'e, E>,
+    ) -> Option<E::VirtualAddress> {
+        self.cache_many_addr(AddressAnalysis::FlushOutgoingCommandTurn,
+                             |s| s.cache_flush_outgoing_command_turn(actx))
+    }
+
+    fn cache_send_turn_message(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        self.cache_many(&[SendTurnMessage], &[],
+            |s| {
+                let flush = s.flush_outgoing_command_turn(actx)?;
+                let length = s.outgoing_command_length(actx)?;
+                let result = commands::send_turn_message(actx, flush, length);
                 Some(([result], []))
             })
     }
