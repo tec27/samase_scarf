@@ -912,6 +912,7 @@ results! {
         MinimapColorMode => minimap_color_mode => cache_minimap_event_handler,
         OutgoingCommandBuffer => outgoing_command_buffer => cache_outgoing_commands,
         OutgoingCommandLength => outgoing_command_length => cache_outgoing_commands,
+        BuiltinTurnLatency => builtin_turn_latency => cache_builtin_turn_latency,
     }
 }
 
@@ -5460,6 +5461,21 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
                 let flush_local = s.flush_local_turns_to_latency_depth(actx)?;
                 let result = commands::get_outstanding_turn_count(actx, flush_local);
                 Some(([result], []))
+            })
+    }
+
+    fn sync_active(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<Operand<'e>> {
+        self.cache_many_op(OperandAnalysis::SyncActive, |s| s.cache_game_loop(actx))
+    }
+
+    fn cache_builtin_turn_latency(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use OperandAnalysis::*;
+        self.cache_many(&[], &[BuiltinTurnLatency],
+            |s| {
+                let flush_local = s.flush_local_turns_to_latency_depth(actx)?;
+                let sync_active = s.sync_active(actx)?;
+                let result = commands::builtin_turn_latency(actx, flush_local, sync_active);
+                Some(([], [result]))
             })
     }
 }
