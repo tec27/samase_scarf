@@ -1626,7 +1626,7 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 LoadConsoles | InitConsoles | GetUiConsoles | GetStatResIconsDdsGrp |
                 GetUnitSkin | JoinCustomGame | FindFileWithCrc | ForFilesInDir |
                 SimpleFileMatchCallback | GetLocales | InitGameMap | SaveReplay |
-                AdvanceTurnTimerAndStepNetwork => continue,
+                AdvanceTurnTimerAndStepNetwork | RecomputeTurnDurations => continue,
             _ => (),
         }
         assert!(result.is_some(), "Missing {}", addr.name());
@@ -1647,7 +1647,7 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 RgbColors | DisableColorChoice | UseMapSetRgbColor | SfxData | SoundChannels |
                 Images | TilesetCv5 | TilesetData | TilesetVx4Ex | TileDefaultFlags |
                 MinitileGraphics | MinitileData | FoliageState | CreepOriginalTiles |
-                CreepTileBorders | CursorScaleFactor =>
+                CreepTileBorders | CursorScaleFactor | TurnDurationBySpeed =>
             {
                 continue;
             }
