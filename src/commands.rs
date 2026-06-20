@@ -503,6 +503,68 @@ impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FindFlushOutgoing<'e,
     }
 }
 
+/// Finds `send_turn_message`.
+///
+/// It is the call inside `flush_outgoing_command_turn` that hands the assembled turn to Storm:
+///   send_turn_message(.., .., &outgoing_command_buffer, outgoing_command_length);
+///   outgoing_command_length = 0;
+/// The anti-tamper obfuscation corrupts scarf's argument tracking at that call (the buffer/length
+/// args resolve to undefined memory), so the call is pinned positionally instead: it is the call
+/// immediately preceding the `outgoing_command_length = 0` reset. The sync-command emitter is only
+/// invoked *after* the reset, so the last call before it is unambiguously `send_turn_message`.
+pub(crate) fn send_turn_message<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    flush_outgoing_command_turn: E::VirtualAddress,
+    outgoing_command_length: Operand<'e>,
+) -> Option<E::VirtualAddress> {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let length_addr = outgoing_command_length.if_memory()?.if_constant_address()?;
+    let mut result = None;
+    let mut analyzer = FindSendTurnMessage::<E> {
+        result: &mut result,
+        length_addr,
+        candidate: None,
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, flush_outgoing_command_turn);
+    analysis.analyze(&mut analyzer);
+    result
+}
+
+struct FindSendTurnMessage<'a, 'e, E: ExecutionState<'e>> {
+    result: &'a mut Option<E::VirtualAddress>,
+    length_addr: u64,
+    candidate: Option<E::VirtualAddress>,
+}
+
+impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FindSendTurnMessage<'a, 'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        match *op {
+            Operation::Call(dest) => {
+                if let Some(dest) = ctrl.resolve_va(dest) {
+                    self.candidate = Some(dest);
+                }
+            }
+            Operation::Move(ref dest, val) => {
+                if let DestOperand::Memory(mem) = dest {
+                    let dest = ctrl.resolve_mem(mem);
+                    if dest.if_constant_address() == Some(self.length_addr) &&
+                        ctrl.resolve(val).if_constant() == Some(0)
+                    {
+                        if let Some(candidate) = self.candidate {
+                            *self.result = Some(candidate);
+                            ctrl.end_analysis();
+                        }
+                    }
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
 pub(crate) fn analyze_process_fn_switch<'e, E: ExecutionState<'e>>(
     actx: &AnalysisCtx<'e, E>,
     func: E::VirtualAddress,

@@ -952,6 +952,7 @@ fn everything_1232e() {
         assert_eq!(analysis.outgoing_command_buffer().unwrap(), ctx.constant(0x01070F08));
         assert_eq!(analysis.outgoing_command_length().unwrap(), ctx.mem32c(0x01070F04));
         assert_eq!(analysis.flush_outgoing_command_turn().unwrap().0, 0x00727270);
+        assert_eq!(analysis.send_turn_message().unwrap().0, 0x00713420);
 
         let init = analysis.init_game_network().unwrap();
         assert_eq!(init.0, 0x00713cb0);
