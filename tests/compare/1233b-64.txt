@@ -289,6 +289,7 @@ step_unit_timers: 1401e96b0
 stop_creep_disappearing_at_building: 1403f0480
 stop_moving: 1401e9950
 stop_targeting: 1403ed260
+storm_receive_turns: 1403ea840
 switch_construction_image: 1401acb10
 targeting_lclick: 14022e080
 targeting_rclick: 140302d90
@@ -558,6 +559,9 @@ step_ai_regions_player: Mem32[140d4dbd8]
 step_ai_regions_region: Mem32[140d4dc20]
 step_game_frames: Mem32[140c656e8]
 storm_command_user: Mem32[140c6c398]
+storm_turn_base: Mem32[140f353b8]
+storm_turn_lag_threshold: Mem32[140c75b58]
+storm_turn_min_interval: Mem32[140c75b50]
 sync_active: Mem32[140f230a8]
 sync_data: 140f24f50
 targeted_order_fow: Mem8[140f357a5]

@@ -599,6 +599,7 @@ results! {
         GetOutstandingTurnCount => get_outstanding_turn_count => cache_get_outstanding_turn_count,
         AdvanceTurnTimerAndStepNetwork => advance_turn_timer_and_step_network => cache_turn_timer,
         RecomputeTurnDurations => recompute_turn_durations => cache_turn_durations,
+        StormReceiveTurns => storm_receive_turns => cache_storm_turn_globals,
     }
 }
 
@@ -919,6 +920,9 @@ results! {
         TurnDurationBySpeed => turn_duration_by_speed => cache_turn_durations,
         TurnTimerAccumulator => turn_timer_accumulator => cache_turn_timer,
         NetworkWaitingForTurns => network_waiting_for_turns => cache_turn_timer,
+        StormTurnBase => storm_turn_base => cache_storm_turn_globals,
+        StormTurnMinInterval => storm_turn_min_interval => cache_storm_turn_globals,
+        StormTurnLagThreshold => storm_turn_lag_threshold => cache_storm_turn_globals,
     }
 }
 
@@ -5458,6 +5462,24 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
     ) -> Option<E::VirtualAddress> {
         self.cache_many_addr(AddressAnalysis::FlushLocalTurnsToLatencyDepth,
                              |s| s.cache_flush_local_turns(actx))
+    }
+
+    fn receive_storm_turns(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<E::VirtualAddress> {
+        self.cache_many_addr(AddressAnalysis::ReceiveStormTurns, |s| s.cache_step_network(actx))
+    }
+
+    fn cache_storm_turn_globals(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        use OperandAnalysis::*;
+        self.cache_many(&[StormReceiveTurns],
+            &[StormTurnBase, StormTurnMinInterval, StormTurnLagThreshold],
+            |s| {
+                let receive_storm_turns = s.receive_storm_turns(actx)?;
+                let result = commands::storm_turn_globals(actx, receive_storm_turns);
+                Some(([result.storm_receive_turns],
+                    [result.storm_turn_base, result.storm_turn_min_interval,
+                     result.storm_turn_lag_threshold]))
+            })
     }
 
     fn cache_get_outstanding_turn_count(&mut self, actx: &AnalysisCtx<'e, E>) {
