@@ -8,6 +8,7 @@ add_pylon_aura: 006b3490
 add_to_position_search: 0067c460
 add_to_replay_data: 007dcf50
 add_town_unit_ai: 006f3fa0
+advance_turn_timer_and_step_network: 007612f0
 ai_add_military_to_region: 00701950
 ai_attack_clear: 006f28f0
 ai_attack_prepare: 00705e10
@@ -409,6 +410,7 @@ foliage_state: None
 fonts: 11494c4
 game: (Mem32[db6e98] ^ 6f2c0381)
 game_data: 1110fe8
+game_frame_count: Mem32[110f8c4]
 game_lobby: None
 game_screen_height_bwpx: Mem32[db62e4]
 game_screen_height_ratio: Mem32[db62ec]

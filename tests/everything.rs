@@ -1625,7 +1625,8 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 LookupSoundId | SFileOpenFileEx | SFileReadFileEx | SFileCloseFile |
                 LoadConsoles | InitConsoles | GetUiConsoles | GetStatResIconsDdsGrp |
                 GetUnitSkin | JoinCustomGame | FindFileWithCrc | ForFilesInDir |
-                SimpleFileMatchCallback | GetLocales | InitGameMap | SaveReplay => continue,
+                SimpleFileMatchCallback | GetLocales | InitGameMap | SaveReplay |
+                AdvanceTurnTimerAndStepNetwork => continue,
             _ => (),
         }
         assert!(result.is_some(), "Missing {}", addr.name());
@@ -1694,7 +1695,7 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 LastFreePlacementRect | TilesetIndexedMapTiles | Vx4MapTiles | RepulseState |
                 TerrainFramebuf | StatportVideos | StatportTalkingPortraitActive |
                 StatportVideoId | NgdpEnabled | MinimapColorMode | OutgoingCommandLength |
-                BuiltinTurnLatency =>
+                BuiltinTurnLatency | GameFrameCount =>
             {
                 check_global_opt(result, binary, op.name());
             }

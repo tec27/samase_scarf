@@ -597,6 +597,7 @@ results! {
         FlushLocalTurnsToLatencyDepth => flush_local_turns_to_latency_depth =>
             cache_flush_local_turns,
         GetOutstandingTurnCount => get_outstanding_turn_count => cache_get_outstanding_turn_count,
+        AdvanceTurnTimerAndStepNetwork => advance_turn_timer_and_step_network => cache_turn_timer,
     }
 }
 
@@ -913,6 +914,7 @@ results! {
         OutgoingCommandBuffer => outgoing_command_buffer => cache_outgoing_commands,
         OutgoingCommandLength => outgoing_command_length => cache_outgoing_commands,
         BuiltinTurnLatency => builtin_turn_latency => cache_builtin_turn_latency,
+        GameFrameCount => game_frame_count => cache_game_frame_count,
     }
 }
 
@@ -5466,6 +5468,27 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
 
     fn sync_active(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<Operand<'e>> {
         self.cache_many_op(OperandAnalysis::SyncActive, |s| s.cache_game_loop(actx))
+    }
+
+    fn cache_game_frame_count(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use OperandAnalysis::*;
+        self.cache_many(&[], &[GameFrameCount],
+            |s| {
+                let step_network = s.step_network(actx)?;
+                let result = commands::game_frame_count(actx, step_network);
+                Some(([], [result]))
+            })
+    }
+
+    fn cache_turn_timer(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        self.cache_many(&[AdvanceTurnTimerAndStepNetwork], &[],
+            |s| {
+                let step_network = s.step_network(actx)?;
+                let funcs = s.function_finder();
+                let result = commands::analyze_turn_timer(actx, step_network, &funcs);
+                Some(([result.advance_turn_timer_and_step_network], []))
+            })
     }
 
     fn cache_builtin_turn_latency(&mut self, actx: &AnalysisCtx<'e, E>) {
