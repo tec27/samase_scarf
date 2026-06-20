@@ -39,6 +39,11 @@ pub(crate) struct StepReplayCommands<'e, Va: VirtualAddressTrait> {
     pub replay_header: Option<Operand<'e>>,
 }
 
+pub(crate) struct OutgoingCommands<'e> {
+    pub outgoing_command_buffer: Option<Operand<'e>>,
+    pub outgoing_command_length: Option<Operand<'e>>,
+}
+
 pub(crate) struct PrintText<Va: VirtualAddressTrait> {
     pub print_text: Option<Va>,
     pub add_to_replay_data: Option<Va>,
@@ -265,6 +270,99 @@ impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FindSendCommand<'e, E
                         self.is_inlining = false;
                         if self.result.is_some() && !crate::test_assertions() {
                             ctrl.end_analysis();
+                        }
+                    }
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
+/// Finds `outgoing_command_buffer` and `outgoing_command_length` from `send_command`.
+///
+/// `send_command` appends a command record to the local buffer with a tail call equivalent to
+///   string_concat(&outgoing_command_buffer[outgoing_command_length], src, len);
+///   outgoing_command_length += len;
+/// The two globals are anchored together: the concat destination is the constant buffer base
+/// indexed by the length global, and immediately after the length global is incremented by the
+/// (argument) append length. That pairing survives recompiles independently of any address.
+pub(crate) fn outgoing_commands<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    send_command: E::VirtualAddress,
+) -> OutgoingCommands<'e> {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let mut result = OutgoingCommands {
+        outgoing_command_buffer: None,
+        outgoing_command_length: None,
+    };
+    let mut analyzer = OutgoingCommandsAnalyzer::<E> {
+        result: &mut result,
+        concat_candidate: None,
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, send_command);
+    analysis.analyze(&mut analyzer);
+    result
+}
+
+struct OutgoingCommandsAnalyzer<'a, 'e, E: ExecutionState<'e>> {
+    result: &'a mut OutgoingCommands<'e>,
+    // (buffer_const_operand, length_mem_operand) of the last string_concat-shaped call
+    concat_candidate: Option<(Operand<'e>, Operand<'e>)>,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for OutgoingCommandsAnalyzer<'a, 'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        let ctx = ctrl.ctx();
+        match *op {
+            Operation::Call(_) => {
+                // string_concat(&outgoing_command_buffer[outgoing_command_length], ..)
+                // => arg1 has shape `buffer_const + Mem32[outgoing_command_length]`
+                // (the length index may be sign-extended to pointer width on 64bit)
+                let arg1 = ctrl.resolve_arg(0);
+                if let Some((l, r)) = arg1.if_arithmetic_add() {
+                    let buffer_len = match (l.if_constant(), r.if_constant()) {
+                        (Some(_), None) => Some((l, r)),
+                        (None, Some(_)) => Some((r, l)),
+                        _ => None,
+                    };
+                    if let Some((buffer, len)) = buffer_len {
+                        let len_mem = len.unwrap_sext();
+                        let is_global_len = len_mem.if_memory()
+                            .filter(|m| m.size == MemAccessSize::Mem32)
+                            .filter(|m| m.is_global())
+                            .is_some();
+                        if is_global_len {
+                            self.concat_candidate = Some((buffer, len_mem));
+                        }
+                    }
+                }
+            }
+            Operation::Move(ref dest, val) => {
+                if let DestOperand::Memory(mem) = dest {
+                    if mem.size == MemAccessSize::Mem32 {
+                        let dest = ctrl.resolve_mem(mem);
+                        if dest.is_global() {
+                            let dest_op = ctx.memory(&dest);
+                            // outgoing_command_length += len (truncated to 32bit on 64bit builds)
+                            let val = ctrl.resolve(val).unwrap_and_mask();
+                            let is_increment = val.if_arithmetic_add()
+                                .map(|(l, r)| l == dest_op || r == dest_op)
+                                .unwrap_or(false);
+                            if is_increment {
+                                if let Some((buffer, len_mem)) = self.concat_candidate {
+                                    if len_mem == dest_op {
+                                        self.result.outgoing_command_buffer = Some(buffer);
+                                        self.result.outgoing_command_length = Some(dest_op);
+                                        ctrl.end_analysis();
+                                    }
+                                }
+                            }
                         }
                     }
                 }
