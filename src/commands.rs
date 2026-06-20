@@ -968,15 +968,17 @@ pub(crate) fn turn_durations<'e, E: ExecutionState<'e>>(
     };
     result.turn_duration_by_speed = Some(tdbs);
 
-    // recompute_turn_durations: the call/tail-call target of cmd_set_turn_rate (switch case 0x5f)
-    // whose own body fills the table. Resolving it as a call target gives its exact entry, which a
-    // global-reference search would miss when the function finder merges it with a neighbour.
-    let case = match process_commands_switch.branch(binary, ctx, 0x5f) {
-        Some(s) => s,
-        None => return result,
-    };
-    let mut targets = bumpvec_with_capacity(0x20, bump);
-    {
+    // recompute_turn_durations: a call/tail-call target of a turn-rate command handler whose own
+    // body fills the table. Resolving it as a call target gives its exact entry (a global-reference
+    // search instead merges it with a neighbour when recompute is only ever tail-called).
+    // cmd_set_turn_rate (case 0x5f) tail-calls it; cmd_dynamic_turn_rate (case 0x66) regular-calls
+    // it — the latter keeps it a shallow call target even on 64bit, where the 0x5f handler is large.
+    let mut targets = bumpvec_with_capacity(0x40, bump);
+    for &case_id in &[0x5fu8, 0x66] {
+        let case = match process_commands_switch.branch(binary, ctx, case_id as u32) {
+            Some(s) => s,
+            None => continue,
+        };
         let mut collector = CollectCallTailTargets::<E> {
             targets: bumpvec_with_capacity(0x10, bump),
             entry_esp: ctx.register(4),
@@ -1113,10 +1115,12 @@ impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FindTurnDurationFill<
                     if mem.size == MemAccessSize::Mem32 &&
                         ctrl.resolve(val).if_constant() == Some(0x3e8)
                     {
-                        // turn_duration_by_speed[i] = 0x3e8 floor
+                        // turn_duration_by_speed[i] = 0x3e8 floor. The write lands inside the
+                        // 7-dword table; with a constant-folded index the array base shows up as
+                        // the address offset (table_addr + i*4), so accept any write in that range.
                         let dest = ctrl.resolve_mem(mem);
-                        let (base, offset) = dest.address();
-                        if offset == self.table_addr && base.if_constant().is_none() {
+                        let (_, offset) = dest.address();
+                        if offset >= self.table_addr && offset < self.table_addr + 0x1c {
                             self.found = true;
                             ctrl.end_analysis();
                         }
