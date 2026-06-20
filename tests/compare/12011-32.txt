@@ -489,6 +489,7 @@ net_player_to_unique: 100f980
 net_players: 10120a0
 net_user_latency: None
 network_ready: Mem8[100f881]
+network_waiting_for_turns: Mem8[fe6121]
 next_game_step_tick: Mem32[fe6128]
 ngdp_enabled: Mem8[d02f88]
 ngdp_instance: d030d0
@@ -575,6 +576,7 @@ tranwire_ddsgrp: 102da54
 tranwire_grp: Mem32[102daa0]
 trigger_current_player: Mem32[1034930]
 turn_duration_by_speed: fe6130
+turn_timer_accumulator: Mem32[fe614c]
 ui_consoles: None
 unique_command_user: Mem32[cbceec]
 unit_count: Mem32[e2410c]

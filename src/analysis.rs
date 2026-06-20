@@ -917,6 +917,8 @@ results! {
         BuiltinTurnLatency => builtin_turn_latency => cache_builtin_turn_latency,
         GameFrameCount => game_frame_count => cache_game_frame_count,
         TurnDurationBySpeed => turn_duration_by_speed => cache_turn_durations,
+        TurnTimerAccumulator => turn_timer_accumulator => cache_turn_timer,
+        NetworkWaitingForTurns => network_waiting_for_turns => cache_turn_timer,
     }
 }
 
@@ -5484,12 +5486,15 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
 
     fn cache_turn_timer(&mut self, actx: &AnalysisCtx<'e, E>) {
         use AddressAnalysis::*;
-        self.cache_many(&[AdvanceTurnTimerAndStepNetwork], &[],
+        use OperandAnalysis::*;
+        self.cache_many(&[AdvanceTurnTimerAndStepNetwork],
+            &[TurnTimerAccumulator, NetworkWaitingForTurns],
             |s| {
                 let step_network = s.step_network(actx)?;
                 let funcs = s.function_finder();
                 let result = commands::analyze_turn_timer(actx, step_network, &funcs);
-                Some(([result.advance_turn_timer_and_step_network], []))
+                Some(([result.advance_turn_timer_and_step_network],
+                    [result.turn_timer_accumulator, result.network_waiting_for_turns]))
             })
     }
 
