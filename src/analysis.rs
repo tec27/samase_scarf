@@ -905,6 +905,8 @@ results! {
         SnetPlayerList => snet_player_list => cache_snet_recv_packets,
         CursorScaleFactor => cursor_scale_factor,
         MinimapColorMode => minimap_color_mode => cache_minimap_event_handler,
+        OutgoingCommandBuffer => outgoing_command_buffer => cache_outgoing_commands,
+        OutgoingCommandLength => outgoing_command_length => cache_outgoing_commands,
     }
 }
 
@@ -5369,6 +5371,16 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
                 let switch = s.process_commands_switch(actx)?;
                 let result = commands::cancel_unit(actx, process_commands, &switch);
                 Some(([result.cancel_unit], []))
+            })
+    }
+
+    fn cache_outgoing_commands(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use OperandAnalysis::*;
+        self.cache_many(&[], &[OutgoingCommandBuffer, OutgoingCommandLength],
+            |s| {
+                let send_command = s.send_command(actx)?;
+                let result = commands::outgoing_commands(actx, send_command);
+                Some(([], [result.outgoing_command_buffer, result.outgoing_command_length]))
             })
     }
 }

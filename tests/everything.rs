@@ -949,6 +949,8 @@ fn everything_1232e() {
         assert_eq!(analysis.player_turns().unwrap(), ctx.constant(0x01071118));
         assert_eq!(analysis.player_turns_size().unwrap(), ctx.constant(0x01071148));
         assert_eq!(analysis.network_ready().unwrap(), ctx.mem8c(0x0106F57D));
+        assert_eq!(analysis.outgoing_command_buffer().unwrap(), ctx.constant(0x01070F08));
+        assert_eq!(analysis.outgoing_command_length().unwrap(), ctx.mem32c(0x01070F04));
 
         let init = analysis.init_game_network().unwrap();
         assert_eq!(init.0, 0x00713cb0);
@@ -1693,7 +1695,7 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 FirstFreePlacementImage | LastFreePlacementImage | FirstFreePlacementRect |
                 LastFreePlacementRect | TilesetIndexedMapTiles | Vx4MapTiles | RepulseState |
                 TerrainFramebuf | StatportVideos | StatportTalkingPortraitActive |
-                StatportVideoId | NgdpEnabled | MinimapColorMode =>
+                StatportVideoId | NgdpEnabled | MinimapColorMode | OutgoingCommandLength =>
             {
                 check_global_opt(result, binary, op.name());
             }
@@ -1710,7 +1712,7 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 DcreepListBegin | DcreepListSize | ReplayHeader | GameScreenRectWinPx |
                 RunDialogStack | LurkerHits | ResourceAreas | HpBarImages | HpBarState |
                 SelectionCircles | PlacementImages | PlacementRects | ShieldOverlays | ImagesRel |
-                SnetLocalPlayerList | SnetPlayerList | NgdpInstance =>
+                SnetLocalPlayerList | SnetPlayerList | NgdpInstance | OutgoingCommandBuffer =>
             {
                 check_global_struct_opt(result, binary, op.name());
             }
