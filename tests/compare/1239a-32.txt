@@ -119,6 +119,7 @@ get_images_rel: 0056d030
 get_locales: 0061c7c0
 get_mouse_x: 006bb690
 get_mouse_y: 006bb6a0
+get_outstanding_turn_count: 007a6930
 get_region: 007694e0
 get_render_target: 00ac3dd0
 get_sight_range: 0059b0d0

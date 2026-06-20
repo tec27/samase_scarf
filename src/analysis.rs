@@ -596,6 +596,7 @@ results! {
         SendTurnMessage => send_turn_message => cache_send_turn_message,
         FlushLocalTurnsToLatencyDepth => flush_local_turns_to_latency_depth =>
             cache_flush_local_turns,
+        GetOutstandingTurnCount => get_outstanding_turn_count => cache_get_outstanding_turn_count,
     }
 }
 
@@ -5450,6 +5451,16 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
     ) -> Option<E::VirtualAddress> {
         self.cache_many_addr(AddressAnalysis::FlushLocalTurnsToLatencyDepth,
                              |s| s.cache_flush_local_turns(actx))
+    }
+
+    fn cache_get_outstanding_turn_count(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        self.cache_many(&[GetOutstandingTurnCount], &[],
+            |s| {
+                let flush_local = s.flush_local_turns_to_latency_depth(actx)?;
+                let result = commands::get_outstanding_turn_count(actx, flush_local);
+                Some(([result], []))
+            })
     }
 }
 
