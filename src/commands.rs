@@ -678,6 +678,49 @@ impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for IsFlushLocalTurns<'e,
     }
 }
 
+/// Finds `get_outstanding_turn_count`.
+///
+/// It is the first call `flush_local_turns_to_latency_depth` makes:
+///   outstanding = get_outstanding_turn_count(&local);
+///   if (outstanding == 0) return error;
+/// A Storm-boundary helper (reads `storm_provider_ready`, returns a difference of two turn
+/// sequence words), so it stays a separate function even on builds that inline flush into the loop.
+pub(crate) fn get_outstanding_turn_count<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    flush_local_turns_to_latency_depth: E::VirtualAddress,
+) -> Option<E::VirtualAddress> {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let mut result = None;
+    let mut analyzer = FindGetOutstandingTurnCount::<E> {
+        result: &mut result,
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, flush_local_turns_to_latency_depth);
+    analysis.analyze(&mut analyzer);
+    result
+}
+
+struct FindGetOutstandingTurnCount<'a, 'e, E: ExecutionState<'e>> {
+    result: &'a mut Option<E::VirtualAddress>,
+}
+
+impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for
+    FindGetOutstandingTurnCount<'a, 'e, E>
+{
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        if let Operation::Call(dest) = *op {
+            // Skip the 64bit stack probe so the first *real* call is taken.
+            if ctrl.check_stack_probe() {
+                return;
+            }
+            *self.result = ctrl.resolve_va(dest);
+            ctrl.end_analysis();
+        }
+    }
+}
+
 pub(crate) fn analyze_process_fn_switch<'e, E: ExecutionState<'e>>(
     actx: &AnalysisCtx<'e, E>,
     func: E::VirtualAddress,
