@@ -1647,7 +1647,8 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 RgbColors | DisableColorChoice | UseMapSetRgbColor | SfxData | SoundChannels |
                 Images | TilesetCv5 | TilesetData | TilesetVx4Ex | TileDefaultFlags |
                 MinitileGraphics | MinitileData | FoliageState | CreepOriginalTiles |
-                CreepTileBorders | CursorScaleFactor | TurnDurationBySpeed =>
+                CreepTileBorders | CursorScaleFactor | TurnDurationBySpeed |
+                TurnTimerAccumulator | NetworkWaitingForTurns =>
             {
                 continue;
             }
