@@ -226,6 +226,7 @@ select_mouse_up: 1403e41b0
 select_units: 1403bd870
 send_command: 140376a50
 send_queued_lobby_commands: 1403601f0
+send_turn_message: 14036d4e0
 serialize_images: 140184590
 serialize_sprites: 14018a540
 set_briefing_music: 14032dd00
