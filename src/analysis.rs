@@ -591,6 +591,7 @@ results! {
             cache_check_resources_for_building,
         CancelUnit => cancel_unit => cache_cancel_unit_finding,
         RandSynced => rand_synced => cache_rng,
+        AdvanceTurnTimerAndStepNetwork => advance_turn_timer_and_step_network => cache_turn_timer,
     }
 }
 
@@ -904,6 +905,7 @@ results! {
         SnetPlayerList => snet_player_list => cache_snet_recv_packets,
         CursorScaleFactor => cursor_scale_factor,
         MinimapColorMode => minimap_color_mode => cache_minimap_event_handler,
+        GameFrameCount => game_frame_count => cache_game_frame_count,
     }
 }
 
@@ -5342,6 +5344,27 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
                 Some(([result.cancel_unit], []))
             })
     }
+    fn cache_game_frame_count(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use OperandAnalysis::*;
+        self.cache_many(&[], &[GameFrameCount],
+            |s| {
+                let step_network = s.step_network(actx)?;
+                let result = commands::game_frame_count(actx, step_network);
+                Some(([], [result]))
+            })
+    }
+
+    fn cache_turn_timer(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        self.cache_many(&[AdvanceTurnTimerAndStepNetwork], &[],
+            |s| {
+                let step_network = s.step_network(actx)?;
+                let funcs = s.function_finder();
+                let result = commands::analyze_turn_timer(actx, step_network, &funcs);
+                Some(([result.advance_turn_timer_and_step_network], []))
+            })
+    }
+
 }
 
 pub struct DatPatchesDebug<'e, Va: VirtualAddress> {
