@@ -592,6 +592,7 @@ results! {
             cache_check_resources_for_building,
         CancelUnit => cancel_unit => cache_cancel_unit_finding,
         RandSynced => rand_synced => cache_rng,
+        FlushOutgoingCommandTurn => flush_outgoing_command_turn => cache_flush_outgoing_command_turn,
     }
 }
 
@@ -5381,6 +5382,30 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
                 let send_command = s.send_command(actx)?;
                 let result = commands::outgoing_commands(actx, send_command);
                 Some(([], [result.outgoing_command_buffer, result.outgoing_command_length]))
+            })
+    }
+
+    fn outgoing_command_buffer(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<Operand<'e>> {
+        self.cache_many_op(OperandAnalysis::OutgoingCommandBuffer,
+                           |s| s.cache_outgoing_commands(actx))
+    }
+
+    fn outgoing_command_length(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<Operand<'e>> {
+        self.cache_many_op(OperandAnalysis::OutgoingCommandLength,
+                           |s| s.cache_outgoing_commands(actx))
+    }
+
+    fn cache_flush_outgoing_command_turn(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        self.cache_many(&[FlushOutgoingCommandTurn], &[],
+            |s| {
+                let send_command = s.send_command(actx)?;
+                let buffer = s.outgoing_command_buffer(actx)?;
+                let length = s.outgoing_command_length(actx)?;
+                let funcs = s.function_finder();
+                let result = commands::flush_outgoing_command_turn(
+                    actx, send_command, buffer, length, &funcs);
+                Some(([result], []))
             })
     }
 }

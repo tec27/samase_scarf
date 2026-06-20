@@ -372,6 +372,137 @@ impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for OutgoingCommandsA
     }
 }
 
+/// Finds `flush_outgoing_command_turn`.
+///
+/// Anchored on the empty-turn keep-alive seed + reset that bracket the function:
+///   if (outgoing_command_length == 0) { outgoing_command_buffer[0] = 5; outgoing_command_length = 1; }
+///   ... send_turn_message(.., &outgoing_command_buffer, outgoing_command_length) ...
+///   outgoing_command_length = 0;
+/// (cmd id 5 = the empty-turn keep-alive). On some (older) builds the compiler also inlines a copy
+/// of this body into the latency loop, so the seed+reset pattern is not always unique. The real
+/// standalone `flush_outgoing_command_turn` is the one `send_command` calls from its overflow path
+/// (an inliner is never a callee), so that call relationship breaks the tie.
+pub(crate) fn flush_outgoing_command_turn<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    send_command: E::VirtualAddress,
+    outgoing_command_buffer: Operand<'e>,
+    outgoing_command_length: Operand<'e>,
+    functions: &FunctionFinder<'_, 'e, E>,
+) -> Option<E::VirtualAddress> {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let bump = &actx.bump;
+    let buffer_addr = outgoing_command_buffer.if_constant()?;
+    let length_addr = outgoing_command_length.if_memory()?.if_constant_address()?;
+    let buffer_va = E::VirtualAddress::from_u64(buffer_addr);
+
+    let mut refs = functions.find_functions_using_global(actx, buffer_va);
+    refs.sort_unstable_by_key(|x| x.func_entry);
+    refs.dedup_by_key(|x| x.func_entry);
+    let funcs = functions.functions();
+
+    let mut candidates = bumpvec_with_capacity(4, bump);
+    for global_ref in refs.iter() {
+        let entry = entry_of_until(binary, &funcs, global_ref.use_address, |entry| {
+            let mut analysis = FuncAnalysis::new(binary, ctx, entry);
+            let mut analyzer = FindFlushOutgoing::<E> {
+                result: EntryOf::Retry,
+                buffer_addr,
+                length_addr,
+                seen_seed_buffer: false,
+                seen_seed_length: false,
+                phantom: Default::default(),
+            };
+            analysis.analyze(&mut analyzer);
+            analyzer.result
+        }).into_option_with_entry().map(|x| x.0);
+        if let Some(entry) = entry {
+            if !candidates.contains(&entry) {
+                candidates.push(entry);
+            }
+        }
+    }
+    match candidates.len() {
+        0 => None,
+        1 => Some(candidates[0]),
+        _ => {
+            // Multiple seed+reset bodies (standalone flush + an inlined copy). Keep the one
+            // send_command calls directly.
+            let mut analysis = FuncAnalysis::new(binary, ctx, send_command);
+            let mut analyzer = FlushCalledBySendCommand::<E> {
+                candidates: &candidates,
+                result: None,
+                phantom: Default::default(),
+            };
+            analysis.analyze(&mut analyzer);
+            analyzer.result
+        }
+    }
+}
+
+struct FlushCalledBySendCommand<'a, 'e, E: ExecutionState<'e>> {
+    candidates: &'a [E::VirtualAddress],
+    result: Option<E::VirtualAddress>,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FlushCalledBySendCommand<'a, 'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        if let Operation::Call(dest) = *op {
+            if let Some(dest) = ctrl.resolve_va(dest) {
+                if self.candidates.contains(&dest) {
+                    self.result = Some(dest);
+                    ctrl.end_analysis();
+                }
+            }
+        }
+    }
+}
+
+struct FindFlushOutgoing<'e, E: ExecutionState<'e>> {
+    result: EntryOf<()>,
+    buffer_addr: u64,
+    length_addr: u64,
+    seen_seed_buffer: bool,
+    seen_seed_length: bool,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FindFlushOutgoing<'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        if let Operation::Move(ref dest, val) = *op {
+            if let DestOperand::Memory(mem) = dest {
+                let dest = ctrl.resolve_mem(mem);
+                if let Some(addr) = dest.if_constant_address() {
+                    let val = ctrl.resolve(val);
+                    if addr == self.buffer_addr && val.if_constant() == Some(5) {
+                        self.seen_seed_buffer = true;
+                    } else if addr == self.length_addr {
+                        match val.if_constant() {
+                            // outgoing_command_length = 1: keep-alive seed length
+                            Some(1) => self.seen_seed_length = true,
+                            // outgoing_command_length = 0: reset after sending the turn.
+                            // This reset (paired with the keep-alive seed) is unique to flush,
+                            // disambiguating it from any sibling that only seeds the buffer.
+                            Some(0) => {
+                                if self.seen_seed_buffer && self.seen_seed_length {
+                                    self.result = EntryOf::Ok(());
+                                    ctrl.end_analysis();
+                                }
+                            }
+                            _ => (),
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn analyze_process_fn_switch<'e, E: ExecutionState<'e>>(
     actx: &AnalysisCtx<'e, E>,
     func: E::VirtualAddress,
