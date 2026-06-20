@@ -210,7 +210,7 @@ rand_synced: 1403a29c0
 read_whole_mpq_file: 1405c1310
 read_whole_mpq_file2: 1405c1350
 receive_storm_turns: 14038f7e0
-recompute_turn_durations: None
+recompute_turn_durations: 1403324a0
 refresh_ui: 140402ff0
 remove_from_client_selection: 1401c0a30
 remove_from_selections: 1403df570
