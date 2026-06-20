@@ -721,6 +721,63 @@ impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for
     }
 }
 
+/// Finds `builtin_turn_latency`.
+///
+/// It is the global loaded as the base of the latency loop target in
+/// `flush_local_turns_to_latency_depth`:
+///   target = builtin_turn_latency;
+///   if (sync_active) target += net_user_latency;
+///   while (outstanding < target) flush(..);
+/// `sync_active` is seeded to 0 so the `net_user_latency` add is skipped, leaving the loop bound
+/// exactly `builtin_turn_latency` — the only global in the loop comparison.
+pub(crate) fn builtin_turn_latency<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    flush_local_turns_to_latency_depth: E::VirtualAddress,
+    sync_active: Operand<'e>,
+) -> Option<Operand<'e>> {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let sync_mem = sync_active.if_memory()?;
+
+    let mut state = E::initial_state(ctx, binary);
+    state.write_memory(sync_mem, ctx.const_0());
+    let mut result = None;
+    let mut analyzer = FindBuiltinTurnLatency::<E> {
+        result: &mut result,
+        sync_active,
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::with_state(
+        binary, ctx, flush_local_turns_to_latency_depth, state);
+    analysis.analyze(&mut analyzer);
+    result
+}
+
+struct FindBuiltinTurnLatency<'a, 'e, E: ExecutionState<'e>> {
+    result: &'a mut Option<Operand<'e>>,
+    sync_active: Operand<'e>,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FindBuiltinTurnLatency<'a, 'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        if let Operation::Jump { condition, .. } = *op {
+            let condition = ctrl.resolve(condition);
+            // The loop bound `outstanding < builtin_turn_latency` is the only comparison with a
+            // global memory operand (sync_active was seeded to a constant).
+            let global = condition.iter()
+                .filter(|&x| x != self.sync_active)
+                .find(|&x| x.if_memory().filter(|m| m.is_global()).is_some());
+            if let Some(global) = global {
+                *self.result = Some(global);
+                ctrl.end_analysis();
+            }
+        }
+    }
+}
+
 pub(crate) fn analyze_process_fn_switch<'e, E: ExecutionState<'e>>(
     actx: &AnalysisCtx<'e, E>,
     func: E::VirtualAddress,

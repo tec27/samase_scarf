@@ -342,6 +342,7 @@ anti_troll: 100a900
 asset_scale: Mem32[f27d20]
 base_anim_set: fc58f0
 bnet_controller: (Mem32[f56318] ^ 3b37060c)
+builtin_turn_latency: Mem32[11c479c]
 campaigns: f55de0
 cheat_flags: Mem32[118ace8]
 chk_init_players: 11c7838
