@@ -1626,7 +1626,8 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 LoadConsoles | InitConsoles | GetUiConsoles | GetStatResIconsDdsGrp |
                 GetUnitSkin | JoinCustomGame | FindFileWithCrc | ForFilesInDir |
                 SimpleFileMatchCallback | GetLocales | InitGameMap | SaveReplay |
-                AdvanceTurnTimerAndStepNetwork | RecomputeTurnDurations => continue,
+                AdvanceTurnTimerAndStepNetwork | RecomputeTurnDurations |
+                RandomizePlayerColors => continue,
             _ => (),
         }
         assert!(result.is_some(), "Missing {}", addr.name());
@@ -1648,7 +1649,8 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 Images | TilesetCv5 | TilesetData | TilesetVx4Ex | TileDefaultFlags |
                 MinitileGraphics | MinitileData | FoliageState | CreepOriginalTiles |
                 CreepTileBorders | CursorScaleFactor | TurnDurationBySpeed |
-                TurnTimerAccumulator | NetworkWaitingForTurns =>
+                TurnTimerAccumulator | NetworkWaitingForTurns |
+                PlayerColorPreference =>
             {
                 continue;
             }
@@ -1714,7 +1716,8 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 DcreepListBegin | DcreepListSize | ReplayHeader | GameScreenRectWinPx |
                 RunDialogStack | LurkerHits | ResourceAreas | HpBarImages | HpBarState |
                 SelectionCircles | PlacementImages | PlacementRects | ShieldOverlays | ImagesRel |
-                SnetLocalPlayerList | SnetPlayerList | NgdpInstance | OutgoingCommandBuffer =>
+                SnetLocalPlayerList | SnetPlayerList | NgdpInstance | OutgoingCommandBuffer |
+                ForceColors =>
             {
                 check_global_struct_opt(result, binary, op.name());
             }
