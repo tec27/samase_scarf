@@ -184,6 +184,7 @@ map_entry_load_save: 009115b0
 map_init_chk_callbacks: 00c36e98
 menu_swish_in: 006ecbe0
 menu_swish_out: 006ec230
+minimap_dialog_event_handler: 00708de0
 move_screen: 00648f60
 move_sprite: 00573de0
 move_unit: 005dca80
@@ -485,6 +486,7 @@ map_width_pixels: Mem16[df0e4c]
 menu_screen_id: ((((Mem32[d918b6] * 2) + 30a32318) ^ Mem32[f77bd4]) & ffffffff)
 minimap_color_mode: Mem8[f7d390]
 minimap_cursor_type: Mem16[f744c4]
+minimap_terrain_hidden: Mem8[f7d4c2]
 minitile_data: None
 minitile_graphics: None
 mouse_x: Mem16[f9db08]

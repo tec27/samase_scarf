@@ -1697,7 +1697,8 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 FirstFreePlacementImage | LastFreePlacementImage | FirstFreePlacementRect |
                 LastFreePlacementRect | TilesetIndexedMapTiles | Vx4MapTiles | RepulseState |
                 TerrainFramebuf | StatportVideos | StatportTalkingPortraitActive |
-                StatportVideoId | NgdpEnabled | MinimapColorMode | OutgoingCommandLength |
+                StatportVideoId | NgdpEnabled | MinimapColorMode | MinimapTerrainHidden |
+                OutgoingCommandLength |
                 BuiltinTurnLatency | GameFrameCount | StormTurnBase | StormTurnMinInterval |
                 StormTurnLagThreshold =>
             {

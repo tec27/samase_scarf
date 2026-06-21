@@ -10,8 +10,10 @@ use crate::util::{
 };
 use crate::struct_layouts::StructLayouts;
 
-pub(crate) struct EventHandler<'e> {
+pub(crate) struct EventHandler<'e, E: ExecutionState<'e>> {
+    pub minimap_dialog_event_handler: Option<E::VirtualAddress>,
     pub minimap_color_mode: Option<Operand<'e>>,
+    pub minimap_terrain_hidden: Option<Operand<'e>>,
 }
 
 pub(crate) fn unexplored_fog_minimap_patch<'e, E: ExecutionState<'e>>(
@@ -425,11 +427,13 @@ impl<'a, 'acx, 'e: 'acx, E: ExecutionState<'e>> scarf::Analyzer<'e> for
 pub(crate) fn analyze_event_handler<'e, E: ExecutionState<'e>>(
     actx: &AnalysisCtx<'e, E>,
     functions: &FunctionFinder<'_, 'e, E>,
-) -> EventHandler<'e> {
+) -> EventHandler<'e, E> {
     let binary = actx.binary;
     let ctx = actx.ctx;
     let mut result = EventHandler {
+        minimap_dialog_event_handler: None,
         minimap_color_mode: None,
+        minimap_terrain_hidden: None,
     };
     let event_handler = crate::dialog::run_dialog_analysis(
         actx,
@@ -441,6 +445,9 @@ pub(crate) fn analyze_event_handler<'e, E: ExecutionState<'e>>(
         Some(s) => s,
         None => return result,
     };
+    // The function that owns the minimap_color_mode / minimap_terrain_hidden writes; both are
+    // toggled inline here (no standalone setter), so this is the hook point for those changes.
+    result.minimap_dialog_event_handler = Some(event_handler);
     let mut analyzer = EventHandlerAnalyzer::<E> {
         result: &mut result,
         phantom: Default::default(),
@@ -456,7 +463,7 @@ pub(crate) fn analyze_event_handler<'e, E: ExecutionState<'e>>(
 }
 
 struct EventHandlerAnalyzer<'a, 'e, E: ExecutionState<'e>> {
-    result: &'a mut EventHandler<'e>,
+    result: &'a mut EventHandler<'e, E>,
     phantom: std::marker::PhantomData<(*const E, &'e ())>,
 }
 
@@ -464,18 +471,29 @@ impl<'a, 'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for EventHandlerAnalyzer
     type State = analysis::DefaultState;
     type Exec = E;
     fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
-        // For event type 0xf (Key event), minimap_color_mode should be just
-        // write of constant 2 to a global
+        // For event type 0xf (Tab key event) the handler branches on whether shift is held:
+        // - Shift+Tab cycles minimap_color_mode through 0..3; the observer snap path writes
+        //   constant 2 to that global, which is what is matched here.
+        // - Tab alone toggles minimap_terrain_hidden with `x = (x == 0)` (cmp global, 0 / sete),
+        //   which scarf resolves to a write of (global == 0) back to the same global.
         if let Operation::Move(DestOperand::Memory(ref mem), value) = *op {
+            let ctx = ctrl.ctx();
             let value = ctrl.resolve(value);
             if value.if_constant() == Some(2) {
                 let dest = ctrl.resolve_mem(mem);
                 if dest.is_global() {
-                    let ctx = ctrl.ctx();
-                    let value = ctx.memory(&dest);
-                    self.result.minimap_color_mode = Some(value);
-                    ctrl.end_analysis();
+                    self.result.minimap_color_mode = Some(ctx.memory(&dest));
                 }
+            } else if let Some((inner, true)) = value.if_arithmetic_eq_neq_zero(ctx) {
+                let dest = ctrl.resolve_mem(mem);
+                if dest.is_global() && inner == ctx.memory(&dest) {
+                    self.result.minimap_terrain_hidden = Some(ctx.memory(&dest));
+                }
+            }
+            if self.result.minimap_color_mode.is_some() &&
+                self.result.minimap_terrain_hidden.is_some()
+            {
+                ctrl.end_analysis();
             }
         }
     }
