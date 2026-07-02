@@ -513,6 +513,7 @@ outgoing_command_length: Mem32[1030700]
 palette_set: 1069298
 path_array: Mem32[e6c498]
 pathing: Mem32[103596c]
+pending_leave_reason: 1031528
 placement_images: d78c18
 placement_rects: d79c20
 player_ai: e4cb10

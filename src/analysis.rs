@@ -949,6 +949,9 @@ results! {
         StormTurnBase => storm_turn_base => cache_storm_turn_globals,
         StormTurnMinInterval => storm_turn_min_interval => cache_storm_turn_globals,
         StormTurnLagThreshold => storm_turn_lag_threshold => cache_storm_turn_globals,
+        // int32[0xc] indexed by storm player id; nonzero = leave/drop reason that
+        // apply_pending_player_leaves applies and clears on the next synced turn.
+        PendingLeaveReason => pending_leave_reason => cache_apply_pending_player_leaves,
     }
 }
 
@@ -5599,11 +5602,14 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
 
     fn cache_apply_pending_player_leaves(&mut self, actx: &AnalysisCtx<'e, E>) {
         use AddressAnalysis::*;
-        self.cache_many(&[ApplyPendingPlayerLeaves], &[],
+        use OperandAnalysis::PendingLeaveReason;
+        self.cache_many(&[ApplyPendingPlayerLeaves], &[PendingLeaveReason],
             |s| {
                 let receive_storm_turns = s.receive_storm_turns(actx)?;
-                let result = commands::apply_pending_player_leaves(actx, receive_storm_turns);
-                Some(([result], []))
+                let func = commands::apply_pending_player_leaves(actx, receive_storm_turns);
+                let pending_leave_reason =
+                    func.and_then(|x| commands::pending_leave_reason(actx, x));
+                Some(([func], [pending_leave_reason]))
             })
     }
 

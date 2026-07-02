@@ -1718,7 +1718,7 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 RunDialogStack | LurkerHits | ResourceAreas | HpBarImages | HpBarState |
                 SelectionCircles | PlacementImages | PlacementRects | ShieldOverlays | ImagesRel |
                 SnetLocalPlayerList | SnetPlayerList | NgdpInstance | OutgoingCommandBuffer |
-                ForceColors =>
+                ForceColors | PendingLeaveReason =>
             {
                 check_global_struct_opt(result, binary, op.name());
             }
