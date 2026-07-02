@@ -1313,6 +1313,74 @@ impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FindApplyPendingL
     }
 }
 
+/// Finds `pending_leave_reason`, int32[0xc] indexed by storm player id; a nonzero value is the
+/// server-coordinated leave/drop reason applied (and cleared) on the next synced turn.
+///
+/// `apply_pending_player_leaves` either loops over the slots calling
+/// `apply_player_leave_if_pending(&pending_leave_reason[i], player_id)`, so on the first
+/// iteration (i = 0, player_id = 0) arg1 resolves to the array base constant, or (some 32bit
+/// builds) has the loops factored into helper calls taking the array base in ecx, or has
+/// everything inlined, in which case the base is found from the pending_leave_reason[0] == 0
+/// slot check instead.
+pub(crate) fn pending_leave_reason<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    apply_pending_player_leaves: E::VirtualAddress,
+) -> Option<Operand<'e>> {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let mut result = None;
+    let mut analyzer = FindPendingLeaveReason::<E> {
+        result: &mut result,
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, apply_pending_player_leaves);
+    analysis.analyze(&mut analyzer);
+    result
+}
+
+struct FindPendingLeaveReason<'a, 'e, E: ExecutionState<'e>> {
+    result: &'a mut Option<Operand<'e>>,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FindPendingLeaveReason<'a, 'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        if let Operation::Call(..) = *op {
+            let arg1 = ctrl.resolve_arg(0);
+            let base = if arg1.if_constant().is_some() && is_global(arg1) &&
+                ctrl.resolve_arg(1).if_constant() == Some(0)
+            {
+                Some(arg1)
+            } else {
+                // Some 32bit builds factor the loops into one or two helper calls taking
+                // the array base in ecx instead. (The inline shape has a stack local in ecx
+                // at the call, so this doesn't misfire there.)
+                Some(ctrl.resolve_register(1))
+                    .filter(|&x| x.if_constant().is_some() && is_global(x))
+            };
+            if let Some(base) = base {
+                *self.result = Some(base);
+                ctrl.end_analysis();
+            }
+        } else if let Operation::Jump { condition, .. } = *op {
+            // Other builds inline everything; the first slot check
+            // pending_leave_reason[0] == 0 is then the first Mem32 jump, reached with i = 0
+            // before any call. (The is_multiplayer check before it is a Mem8 compare.)
+            let condition = ctrl.resolve(condition);
+            let base = condition.if_arithmetic_eq_neq_zero(ctrl.ctx())
+                .and_then(|x| x.0.if_mem32()?.if_constant_address())
+                .map(|x| ctrl.ctx().constant(x))
+                .filter(|&x| is_global(x));
+            if let Some(base) = base {
+                *self.result = Some(base);
+                ctrl.end_analysis();
+            }
+        }
+    }
+}
+
 pub(crate) fn analyze_process_fn_switch<'e, E: ExecutionState<'e>>(
     actx: &AnalysisCtx<'e, E>,
     func: E::VirtualAddress,
