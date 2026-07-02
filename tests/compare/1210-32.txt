@@ -493,6 +493,7 @@ original_chk_player_types: f4a0b0
 palette_set: f846e0
 path_array: Mem32[f5a1d4]
 pathing: Mem32[f50d5c]
+pending_leave_reason: f4c910
 placement_images: d53ac0
 placement_rects: d54ac8
 player_ai: d65890
