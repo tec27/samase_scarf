@@ -594,6 +594,7 @@ results! {
         StormReceiveTurns => storm_receive_turns => cache_storm_turn_globals,
         ApplyPendingPlayerLeaves => apply_pending_player_leaves =>
             cache_apply_pending_player_leaves,
+        StormCreateGame => storm_create_game => cache_storm_create_game,
         FindStormSessionPlayer => find_storm_session_player => cache_find_storm_session_player,
     }
 }
@@ -3291,6 +3292,13 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
         self.cache_single_address(AddressAnalysis::SnetInitializeProvider, |s| {
             game_init::snet_initialize_provider(actx, s.choose_snp(actx)?)
         })
+    }
+
+    fn cache_storm_create_game(&mut self, actx: &AnalysisCtx<'e, E>) {
+        self.cache_single_address(AddressAnalysis::StormCreateGame, |s| {
+            let single_player_start = s.single_player_start(actx)?;
+            game_init::storm_create_game(actx, single_player_start)
+        });
     }
 
     fn cache_find_storm_session_player(&mut self, actx: &AnalysisCtx<'e, E>) {
