@@ -594,6 +594,7 @@ results! {
         StormReceiveTurns => storm_receive_turns => cache_storm_turn_globals,
         ApplyPendingPlayerLeaves => apply_pending_player_leaves =>
             cache_apply_pending_player_leaves,
+        FindGameTypeTemplate => find_game_type_template => cache_game_type_templates,
         StormCreateGame => storm_create_game => cache_storm_create_game,
         FindStormSessionPlayer => find_storm_session_player => cache_find_storm_session_player,
     }
@@ -915,6 +916,7 @@ results! {
         // int32[0xc] indexed by storm player id; nonzero = leave/drop reason that
         // apply_pending_player_leaves applies and clears on the next synced turn.
         PendingLeaveReason => pending_leave_reason => cache_apply_pending_player_leaves,
+        GameTypeTemplates => game_type_templates => cache_game_type_templates,
     }
 }
 
@@ -3184,6 +3186,23 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
                         result.mde_load_replay, result.mde_load_save], []))
             },
         );
+    }
+
+    fn create_game_multiplayer(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<E::VirtualAddress> {
+        self.cache_many_addr(
+            AddressAnalysis::CreateGameMultiplayer,
+            |s| s.cache_select_map_entry_children(actx),
+        )
+    }
+
+    fn cache_game_type_templates(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        use OperandAnalysis::GameTypeTemplates;
+        self.cache_many(&[FindGameTypeTemplate], &[GameTypeTemplates], |s| {
+            let create_game_multiplayer = s.create_game_multiplayer(actx)?;
+            let result = game_init::game_type_templates(actx, create_game_multiplayer);
+            Some(([result.find_game_type_template], [result.game_type_templates]))
+        })
     }
 
     fn cache_tooltip_related(&mut self, actx: &AnalysisCtx<'e, E>) {
