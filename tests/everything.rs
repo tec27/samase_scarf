@@ -1700,7 +1700,7 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 StatportVideoId | NgdpEnabled | MinimapColorMode | MinimapTerrainHidden |
                 OutgoingCommandLength |
                 BuiltinTurnLatency | GameFrameCount | StormTurnBase | StormTurnMinInterval |
-                StormTurnLagThreshold =>
+                StormTurnLagThreshold | GameTypeTemplates =>
             {
                 check_global_opt(result, binary, op.name());
             }

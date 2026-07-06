@@ -96,6 +96,7 @@ file_exists: 14015af00
 file_read_fatal_error: 1406047c0
 find_file_with_crc: 1402ed840
 find_fow_sprite_for_click: 1403b8ec0
+find_game_type_template: 140329000
 find_nearest_unit_around_unit: 1402f2d20
 find_nearest_unit_in_area: 1402f2e60
 find_nearest_unit_in_area_point: 1402f3030
@@ -430,6 +431,7 @@ game_screen_lclick_callback: Mem64[141013380]
 game_screen_rclick_callback: Mem64[141013388]
 game_screen_rect_winpx: 140e29e10
 game_screen_width_bwpx: Mem32[140d51f10]
+game_type_templates: Mem64[140d73330]
 global_event_handlers: 141012be0
 graphic_layers: 141077590
 grpwire_ddsgrp: 14104f2b8
