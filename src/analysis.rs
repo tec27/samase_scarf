@@ -616,6 +616,7 @@ results! {
         // out *RGBA[4], player; get_player_color, but force/team-colored in color mode 2
         GetPlayerForceColor => get_player_force_color => cache_player_color_funcs,
         RandomizePlayerColors => randomize_player_colors => cache_randomize_player_colors,
+        StormCreateGame => storm_create_game => cache_storm_create_game,
     }
 }
 
@@ -3376,6 +3377,13 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
         self.cache_single_address(AddressAnalysis::SnetInitializeProvider, |s| {
             game_init::snet_initialize_provider(actx, s.choose_snp(actx)?)
         })
+    }
+
+    fn cache_storm_create_game(&mut self, actx: &AnalysisCtx<'e, E>) {
+        self.cache_single_address(AddressAnalysis::StormCreateGame, |s| {
+            let single_player_start = s.single_player_start(actx)?;
+            game_init::storm_create_game(actx, single_player_start)
+        });
     }
 
     fn set_status_screen_tooltip(

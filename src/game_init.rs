@@ -2560,6 +2560,146 @@ impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FindSnetInitProvi
     }
 }
 
+// storm_create_game is Storm's game/session creation function. It is called (usually through a
+// thin wrapper) from single_player_start right after choose_snp; the call is recognised by the
+// same arg shape SinglePlayerStartAnalyzer's SearchingStorm101 state uses (arg4 == 0, arg5 == 0,
+// arg6_u32 == 0, arg7_u32 == Mem8[..]). That call target is either storm_create_game itself
+// (wrapper inlined on this build) or the wrapper that forwards its own arg1 to it. Either way the
+// real storm_create_game is confirmed by a SErrSetLastError(0x4b4) call on its provider-not-ready
+// path (0x4b4 = ERROR_BAD_PROVIDER) -- an algorithmic constant that survives recompiles.
+pub(crate) fn storm_create_game<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    single_player_start: E::VirtualAddress,
+) -> Option<E::VirtualAddress> {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let arg_cache = &actx.arg_cache;
+
+    let mut analyzer = FindStormCreateGameCall::<E> {
+        result: None,
+        first_call: true,
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, single_player_start);
+    analysis.analyze(&mut analyzer);
+    let candidate = analyzer.result?;
+    // Wrapper was inlined on this build: the call went straight to storm_create_game.
+    if is_storm_create_game(actx, candidate) {
+        return Some(candidate);
+    }
+    // Otherwise candidate is the thin wrapper; the inner storm_create_game is the call that
+    // forwards the wrapper's own arg1. (The memset(&local, 0, 0xa8) call takes a stack-local
+    // arg1, so it won't match.)
+    let mut analyzer = FindStormCreateGameInner::<E> {
+        result: None,
+        arg_cache,
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, candidate);
+    analysis.analyze(&mut analyzer);
+    let inner = analyzer.result?;
+    if is_storm_create_game(actx, inner) {
+        Some(inner)
+    } else {
+        None
+    }
+}
+
+fn is_storm_create_game<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    func: E::VirtualAddress,
+) -> bool {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let mut analyzer = IsStormCreateGame::<E> {
+        result: false,
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, func);
+    analysis.analyze(&mut analyzer);
+    analyzer.result
+}
+
+struct FindStormCreateGameCall<'e, E: ExecutionState<'e>> {
+    result: Option<E::VirtualAddress>,
+    first_call: bool,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FindStormCreateGameCall<'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        if let Operation::Call(dest) = *op {
+            let was_first_call = self.first_call;
+            self.first_call = false;
+            let ctx = ctrl.ctx();
+            let zero = ctx.const_0();
+            let ok = Some(ctrl.resolve_arg(3))
+                .filter(|&x| x == zero)
+                .map(|_| ctrl.resolve_arg(4))
+                .filter(|&x| x == zero)
+                .map(|_| ctrl.resolve_arg_u32(5))
+                .filter(|&x| x == zero)
+                .map(|_| ctrl.resolve_arg_u32(6))
+                .filter(|&x| x.if_mem8().is_some())
+                .is_some();
+            if ok {
+                self.result = ctrl.resolve_va(dest);
+                ctrl.end_analysis();
+            } else if was_first_call {
+                ctrl.check_stack_probe();
+            }
+        }
+    }
+}
+
+struct FindStormCreateGameInner<'a, 'e, E: ExecutionState<'e>> {
+    result: Option<E::VirtualAddress>,
+    arg_cache: &'a ArgCache<'e, E>,
+}
+
+impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FindStormCreateGameInner<'a, 'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        if let Operation::Call(dest) = *op {
+            if let Some(dest) = ctrl.resolve_va(dest) {
+                let arg1 = ctrl.resolve_arg(0);
+                let ctx = ctrl.ctx();
+                if ctx.and_const(arg1, 0xffff_ffff) ==
+                    ctx.and_const(self.arg_cache.on_entry(0), 0xffff_ffff)
+                {
+                    self.result = Some(dest);
+                    ctrl.end_analysis();
+                }
+            }
+        }
+    }
+}
+
+struct IsStormCreateGame<'e, E: ExecutionState<'e>> {
+    result: bool,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for IsStormCreateGame<'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        // storm_create_game reports a failed provider-ready check by calling
+        // SErrSetLastError(0x4b4) (ERROR_BAD_PROVIDER). The provider-ready global is unknown at
+        // entry so scarf explores that branch; catch the constant 0x4b4 as it is pushed for the
+        // call (the shared error tail also takes a 0x57 path, so the arg is already merged to
+        // undefined by the time execution reaches the call itself).
+        if let Operation::Move(_, val) = *op {
+            if ctrl.resolve(val).if_constant() == Some(0x4b4) {
+                self.result = true;
+                ctrl.end_analysis();
+            }
+        }
+    }
+}
+
 pub(crate) fn chk_init_players<'e, E: ExecutionState<'e>>(
     analysis: &AnalysisCtx<'e, E>,
     chk_callbacks: E::VirtualAddress,

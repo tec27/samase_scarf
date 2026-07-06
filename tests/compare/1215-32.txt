@@ -297,6 +297,7 @@ step_unit_timers: 005923f0
 stop_creep_disappearing_at_building: 006f1760
 stop_moving: 00592650
 stop_targeting: 006ef980
+storm_create_game: 00853d70
 storm_receive_turns: 008561d0
 switch_construction_image: 00565d90
 targeting_lclick: 005a6f50
