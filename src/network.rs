@@ -2,7 +2,7 @@ use bumpalo::collections::Vec as BumpVec;
 
 use scarf::analysis::{self, Control, FuncAnalysis};
 use scarf::exec_state::{ExecutionState, VirtualAddress};
-use scarf::{MemAccessSize, Operand, OperandCtx, Operation, BinarySection, BinaryFile};
+use scarf::{DestOperand, MemAccessSize, Operand, OperandCtx, Operation, BinarySection, BinaryFile};
 
 use crate::analysis::{AnalysisCtx};
 use crate::analysis_find::{FunctionFinder, find_bytes, entry_of_until, EntryOf};
@@ -568,6 +568,95 @@ impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for IsNetUserLatency<
                     ctrl.end_analysis()
                 }
                 _ => {}
+            }
+        }
+    }
+}
+
+// net_player_count() @ SC:R: `int __cdecl`, no args. Counts the active networked players in the
+// Storm session (local player included) via storm_get_session_player_range(&min,&max,&count),
+// stores the count as a byte into game+0xf1, and returns byte[game+0xf1]. A peerless session
+// yields 1; BW's minimap dialog / MP-button code classifies a game as multiplayer with
+// `is_multiplayer != 0 && net_player_count() > 1`. Anchored on the error string
+// "strERROR_GENERAL_NETWORK" it references on the Storm failure path (a bounded candidate set).
+// game+0xf1 also gets written by the (unrelated, much larger) player-leave handler as a side
+// effect, so a bare write match isn't unique; discriminate on shape instead: this is the only
+// candidate whose containing function writes to game+0xf1 and to *no other* global memory
+// location at all. game+0xf1 is width-stable.
+pub(crate) fn net_player_count<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    functions: &FunctionFinder<'_, 'e, E>,
+    game: Operand<'e>,
+) -> Option<E::VirtualAddress> {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let funcs = functions.functions();
+    let str_refs = functions.string_refs(actx, b"strERROR_GENERAL_NETWORK");
+    let mut result = None;
+    for str_ref in &str_refs {
+        let val = entry_of_until(binary, &funcs, str_ref.use_address, |entry| {
+            let mut analyzer = FindNetPlayerCount::<E> {
+                game,
+                game_field_write: false,
+                other_global_write: false,
+                phantom: Default::default(),
+            };
+            let mut analysis = FuncAnalysis::new(binary, ctx, entry);
+            analysis.analyze(&mut analyzer);
+            if analyzer.game_field_write {
+                if analyzer.other_global_write {
+                    // Reached the right function for this string ref, but it isn't the
+                    // one we want (e.g. the player-leave handler) -- no need to keep
+                    // walking further back for an earlier entry candidate.
+                    EntryOf::Stop
+                } else {
+                    EntryOf::Ok(())
+                }
+            } else {
+                EntryOf::Retry
+            }
+        }).into_option_with_entry().map(|x| x.0);
+        if single_result_assign(val, &mut result) {
+            break;
+        }
+    }
+    result
+}
+
+struct FindNetPlayerCount<'e, E: ExecutionState<'e>> {
+    game: Operand<'e>,
+    // Set once a `Mem8[game + 0xf1] = _` store is seen.
+    game_field_write: bool,
+    // Set if the function stores to any *other* global memory location. net_player_count's
+    // real body only ever touches game+0xf1; the player-leave handler that also happens to
+    // write game+0xf1 touches many other globals (storm_command_user, per-player state, ...),
+    // so this tells the two apart.
+    other_global_write: bool,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FindNetPlayerCount<'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        if let Operation::Move(DestOperand::Memory(ref mem), _) = *op {
+            let resolved = ctrl.resolve_mem(mem);
+            if resolved.is_global() {
+                let (base, offset) = resolved.address();
+                if offset == 0xf1 && base == self.game {
+                    self.game_field_write = true;
+                } else {
+                    self.other_global_write = true;
+                }
+                // Once both are set the verdict is locked to EntryOf::Stop (game+0xf1 plus
+                // another global rules out net_player_count, which writes only game+0xf1), so
+                // stop walking early -- this cuts short the large player-leave handler. Non-
+                // matching candidates must still return Retry (not Stop) via the full walk, so
+                // entry_of_until keeps iterating toward net_player_count's own entry; only this
+                // provably-terminal case may bail.
+                if self.game_field_write && self.other_global_write {
+                    ctrl.end_analysis();
+                }
             }
         }
     }

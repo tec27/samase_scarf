@@ -193,6 +193,7 @@ move_screen: 0066ba50
 move_sprite: 00573c90
 move_unit: 005c51e0
 net_format_turn_rate: 00734450
+net_player_count: 0073f9f0
 open_anim_multi_file: 0052ef80
 open_anim_single_file: 0052e990
 open_file: 00542fc0
