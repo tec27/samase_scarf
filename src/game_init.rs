@@ -2700,6 +2700,128 @@ impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for IsStormCreateGame<'e,
     }
 }
 
+pub(crate) struct GameTypeTemplates<'e, Va: VirtualAddress> {
+    pub find_game_type_template: Option<Va>,
+    pub game_type_templates: Option<Operand<'e>>,
+}
+
+// find_game_type_template looks up a game type/subtype in a registry of 0x20-byte templates and
+// returns a pointer to the matching template. create_game_multiplayer calls it and, on the
+// success branch, copies that 0x20-byte template into its game-data arg1 at file-format offset
+// +0x6d via two unrolled 16-byte moves. That copy is the anchor: a memory move whose source is
+// [ret + k] (ret = the called function's return value) and whose dest is [base + 0x6d + k] with
+// the same k -- the fixed +0x6d delta discriminates from the near-identical sibling
+// find_game_type_registry_x68 (also called here with the same key args, but returns node+0x68 and
+// its result is consumed via a read at +0x124, never copied to +0x6d). 0x6d and 0x20 are
+// serialized file-format offsets, identical on 32/64-bit.
+//
+// find_game_type_template walks a singly-linked list; a node is the end sentinel when node == 0 or
+// (node & 1) != 0 (low-bit tagged). The first node value is the list-head read Mem[head_global],
+// so the operand of the `(node & 1)` sentinel test is the head global directly, which gives us
+// game_type_templates.
+pub(crate) fn game_type_templates<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    create_game_multiplayer: E::VirtualAddress,
+) -> GameTypeTemplates<'e, E::VirtualAddress> {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let mut result = GameTypeTemplates {
+        find_game_type_template: None,
+        game_type_templates: None,
+    };
+
+    let mut analyzer = FindGameTypeTemplate::<E> {
+        result: None,
+        call_tracker: CallTracker::with_capacity(actx, 0x1000_0000, 0x20),
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, create_game_multiplayer);
+    analysis.analyze(&mut analyzer);
+    let Some(func) = analyzer.result else {
+        return result;
+    };
+    result.find_game_type_template = Some(func);
+
+    let mut analyzer = FindGameTypeTemplatesGlobal::<E> {
+        result: None,
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, func);
+    analysis.analyze(&mut analyzer);
+    result.game_type_templates = analyzer.result;
+    result
+}
+
+struct FindGameTypeTemplate<'acx, 'e, E: ExecutionState<'e>> {
+    result: Option<E::VirtualAddress>,
+    call_tracker: CallTracker<'acx, 'e, E>,
+}
+
+impl<'acx, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FindGameTypeTemplate<'acx, 'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        match *op {
+            Operation::Move(DestOperand::Memory(ref mem), val) => {
+                // [base + 0x6d + k] = [Custom(func) + k], k < 0x20, word-or-larger move
+                let val = ctrl.resolve(val);
+                let src = val.if_memory()
+                    .filter(|x| x.size.bits() >= 32 && x.size == mem.size);
+                if let Some(src) = src {
+                    let (src_base, src_off) = src.address();
+                    if let Some(id) = src_base.if_custom() {
+                        if src_off < 0x20 {
+                            let dest = ctrl.resolve_mem(mem);
+                            let dest_off = dest.address().1;
+                            if dest_off == src_off.wrapping_add(0x6d) {
+                                if let Some(func) = self.call_tracker.custom_id_to_func(id) {
+                                    self.result = Some(func);
+                                    ctrl.end_analysis();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Operation::Call(dest) => {
+                if let Some(dest) = ctrl.resolve_va(dest) {
+                    self.call_tracker.add_call(ctrl, dest);
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
+struct FindGameTypeTemplatesGlobal<'e, E: ExecutionState<'e>> {
+    result: Option<Operand<'e>>,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FindGameTypeTemplatesGlobal<'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        // End-sentinel test `(node & 1)`; on the first iteration node is the head read
+        // Mem[game_type_templates], so the masked operand is the list-head global.
+        if let Operation::Jump { condition, .. } = *op {
+            let condition = ctrl.resolve(condition);
+            if let Some((val, _)) = condition.if_and_mask_eq_neq(1) {
+                if let Some(mem) = val.unwrap_and_mask().if_memory() {
+                    let (base, offset) = mem.address();
+                    if mem.is_global() && !base.contains_undefined() {
+                        // The sentinel may only test the pointer's low byte (test al, 1); return
+                        // the list head as a word-sized read regardless of the tested size.
+                        let ctx = ctrl.ctx();
+                        let mem = ctx.mem_access(base, offset, E::WORD_SIZE);
+                        self.result = Some(ctx.memory(&mem));
+                        ctrl.end_analysis();
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn chk_init_players<'e, E: ExecutionState<'e>>(
     analysis: &AnalysisCtx<'e, E>,
     chk_callbacks: E::VirtualAddress,
