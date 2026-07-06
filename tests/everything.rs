@@ -1700,7 +1700,7 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 StatportVideoId | NgdpEnabled | MinimapColorMode | MinimapTerrainHidden |
                 OutgoingCommandLength |
                 BuiltinTurnLatency | GameFrameCount | StormTurnBase | StormTurnMinInterval |
-                StormTurnLagThreshold | GameTypeTemplates =>
+                StormTurnLagThreshold | GameTypeTemplates | MatchmakerSessionCount =>
             {
                 check_global_opt(result, binary, op.name());
             }
@@ -1718,7 +1718,7 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 RunDialogStack | LurkerHits | ResourceAreas | HpBarImages | HpBarState |
                 SelectionCircles | PlacementImages | PlacementRects | ShieldOverlays | ImagesRel |
                 SnetLocalPlayerList | SnetPlayerList | NgdpInstance | OutgoingCommandBuffer |
-                ForceColors | PendingLeaveReason =>
+                ForceColors | PendingLeaveReason | MatchmakerString =>
             {
                 check_global_struct_opt(result, binary, op.name());
             }
