@@ -2822,6 +2822,377 @@ impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FindGameTypeTemplates
     }
 }
 
+/// Offset of the u16 "assigned slot" field within a Storm session-player node (0xffff = none
+/// yet). The struct is pointer-heavy, so this field is at 0x21a on 32-bit builds and 0x2be on
+/// 64-bit builds.
+pub(crate) fn session_player_slot_offset<'e, E: ExecutionState<'e>>() -> u64 {
+    if E::VirtualAddress::SIZE == 4 { 0x21a } else { 0x2be }
+}
+
+pub(crate) struct StormJoinGame<'e, Va: VirtualAddress> {
+    pub storm_join_game: Option<Va>,
+    pub storm_session_player_lookup_or_create: Option<Va>,
+    pub get_local_storm_session_player: Option<Va>,
+    pub storm_register_slot_name: Option<Va>,
+    pub snet_drain_deferred_queue: Option<Va>,
+    pub storm_local_player_slot: Option<Operand<'e>>,
+}
+
+// storm_join_game is Storm's peer-side session join. join_game calls it directly. It is
+// recognised by its body: near the head it compares the storm session slot byte global against
+// 0xff (0xff = not in a game) and, on the already-joined / bad-state path, reports the Storm
+// error code 0x8510_0079 -- an algorithmic constant surviving recompiles. That slot-byte global
+// is storm_local_player_slot.
+//
+// Three session-player helpers are then picked out of storm_join_game's body by call shape:
+//   - storm_session_player_lookup_or_create: the first call forwarding storm_join_game's own key
+//     ptr (arg8) as arg1, confirmed by its body writing the 0xffff "no slot yet" sentinel to a
+//     freshly-created node's slot field ([node + 0x21a]). (A later call also forwards arg8, so the
+//     body check disambiguates.)
+//   - get_local_storm_session_player: the call whose return value is the base of a Mem[+0x21a]
+//     store of the slot byte (the success tail writes the local slot into the local node).
+//   - storm_register_slot_name: the following call whose arg1 is the slot byte.
+//   - snet_drain_deferred_queue: the next call after that whose body dispatches the 'SNET'
+//     (0x534e4554) magic -- a width-independent algorithmic constant.
+pub(crate) fn storm_join_game<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    join_game: E::VirtualAddress,
+) -> StormJoinGame<'e, E::VirtualAddress> {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let mut result = StormJoinGame {
+        storm_join_game: None,
+        storm_session_player_lookup_or_create: None,
+        get_local_storm_session_player: None,
+        storm_register_slot_name: None,
+        snet_drain_deferred_queue: None,
+        storm_local_player_slot: None,
+    };
+
+    let mut analyzer = FindStormJoinGame::<E> {
+        result: None,
+        slot: None,
+        checked: bumpvec_with_capacity(0x20, &actx.bump),
+        actx,
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, join_game);
+    analysis.analyze(&mut analyzer);
+    let (storm_join_game, slot) = match (analyzer.result, analyzer.slot) {
+        (Some(f), Some(s)) => (f, s),
+        _ => return result,
+    };
+    result.storm_join_game = Some(storm_join_game);
+    result.storm_local_player_slot = Some(slot);
+
+    let mut analyzer = StormJoinGameInner::<E> {
+        result: &mut result,
+        slot,
+        state: StormJoinInnerState::FindLookup,
+        call_tracker: CallTracker::with_capacity(actx, 0x1000_0000, 0x20),
+        actx,
+        forced_branches: 0,
+        checked_drain: bumpvec_with_capacity(0x20, &actx.bump),
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, storm_join_game);
+    analysis.analyze(&mut analyzer);
+    result
+}
+
+struct FindStormJoinGame<'acx, 'e, E: ExecutionState<'e>> {
+    result: Option<E::VirtualAddress>,
+    slot: Option<Operand<'e>>,
+    checked: BumpVec<'acx, E::VirtualAddress>,
+    actx: &'acx AnalysisCtx<'e, E>,
+}
+
+impl<'acx, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FindStormJoinGame<'acx, 'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        if let Operation::Call(dest) = *op {
+            if let Some(dest) = ctrl.resolve_va(dest) {
+                if !self.checked.contains(&dest) {
+                    self.checked.push(dest);
+                    if let Some(slot) = is_storm_join_game(self.actx, dest) {
+                        self.result = Some(dest);
+                        self.slot = Some(slot);
+                        ctrl.end_analysis();
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn is_storm_join_game<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    func: E::VirtualAddress,
+) -> Option<Operand<'e>> {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let mut analyzer = IsStormJoinGame::<E> {
+        slot: None,
+        confirmed: false,
+        budget: 0x2000,
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, func);
+    analysis.analyze(&mut analyzer);
+    if analyzer.confirmed {
+        analyzer.slot
+    } else {
+        None
+    }
+}
+
+struct IsStormJoinGame<'e, E: ExecutionState<'e>> {
+    slot: Option<Operand<'e>>,
+    confirmed: bool,
+    budget: u32,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for IsStormJoinGame<'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        if self.budget == 0 {
+            ctrl.end_analysis();
+            return;
+        }
+        self.budget -= 1;
+        match *op {
+            Operation::Jump { condition, .. } => {
+                if self.slot.is_none() {
+                    let condition = ctrl.resolve(condition);
+                    if let Some((l, r, _)) = condition.if_arithmetic_eq_neq() {
+                        let slot = [(l, r), (r, l)].into_iter().find_map(|(a, b)| {
+                            if b.if_constant() == Some(0xff) && a.if_mem8().is_some() &&
+                                is_global(a)
+                            {
+                                Some(a)
+                            } else {
+                                None
+                            }
+                        });
+                        if slot.is_some() {
+                            self.slot = slot;
+                        }
+                    }
+                }
+            }
+            Operation::Move(_, val) => {
+                if self.slot.is_some() &&
+                    ctrl.resolve(val).if_constant() == Some(0x8510_0079)
+                {
+                    self.confirmed = true;
+                    ctrl.end_analysis();
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
+fn is_storm_session_player_lookup<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    func: E::VirtualAddress,
+) -> bool {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let mut analyzer = IsStormSessionPlayerLookup::<E> {
+        result: false,
+        budget: 0x2000,
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, func);
+    analysis.analyze(&mut analyzer);
+    analyzer.result
+}
+
+struct IsStormSessionPlayerLookup<'e, E: ExecutionState<'e>> {
+    result: bool,
+    budget: u32,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for IsStormSessionPlayerLookup<'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        if self.budget == 0 {
+            ctrl.end_analysis();
+            return;
+        }
+        self.budget -= 1;
+        // Newly-created nodes get 0xffff written to their slot field.
+        if let Operation::Move(DestOperand::Memory(ref mem), val) = *op {
+            if mem.size == MemAccessSize::Mem16 &&
+                ctrl.resolve(val).if_constant() == Some(0xffff)
+            {
+                let dest = ctrl.resolve_mem(mem);
+                if dest.address().1 == session_player_slot_offset::<E>() {
+                    self.result = true;
+                    ctrl.end_analysis();
+                }
+            }
+        }
+    }
+}
+
+// snet_drain_deferred_queue dispatches queued packets tagged with the 'SNET' (0x534e4554) magic;
+// that immediate constant is width-independent and survives recompiles.
+fn is_snet_drain_deferred_queue<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    func: E::VirtualAddress,
+) -> bool {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let mut analyzer = IsSnetDrainDeferredQueue::<E> {
+        result: false,
+        budget: 0x800,
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, func);
+    analysis.analyze(&mut analyzer);
+    analyzer.result
+}
+
+struct IsSnetDrainDeferredQueue<'e, E: ExecutionState<'e>> {
+    result: bool,
+    budget: u32,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for IsSnetDrainDeferredQueue<'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        if self.budget == 0 {
+            ctrl.end_analysis();
+            return;
+        }
+        self.budget -= 1;
+        if let Operation::Move(_, val) = *op {
+            if ctrl.resolve(val).if_constant() == Some(0x534e_4554) {
+                self.result = true;
+                ctrl.end_analysis();
+            }
+        }
+    }
+}
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum StormJoinInnerState {
+    FindLookup,
+    FindGetLocal,
+    FindRegister,
+    FindDrain,
+}
+
+struct StormJoinGameInner<'a, 'acx, 'e, E: ExecutionState<'e>> {
+    result: &'a mut StormJoinGame<'e, E::VirtualAddress>,
+    slot: Operand<'e>,
+    state: StormJoinInnerState,
+    call_tracker: CallTracker<'acx, 'e, E>,
+    actx: &'acx AnalysisCtx<'e, E>,
+    forced_branches: u32,
+    checked_drain: BumpVec<'acx, E::VirtualAddress>,
+}
+
+impl<'a, 'acx, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for
+    StormJoinGameInner<'a, 'acx, 'e, E>
+{
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        match *op {
+            Operation::Call(dest) => {
+                let Some(dest) = ctrl.resolve_va(dest) else { return };
+                let ctx = ctrl.ctx();
+                match self.state {
+                    StormJoinInnerState::FindLookup => {
+                        let arg1 = ctrl.resolve_arg(0);
+                        let arg8 = self.actx.arg_cache.on_entry(7);
+                        if ctx.and_const(arg1, 0xffff_ffff) ==
+                            ctx.and_const(arg8, 0xffff_ffff) &&
+                            is_storm_session_player_lookup(self.actx, dest)
+                        {
+                            self.result.storm_session_player_lookup_or_create = Some(dest);
+                            self.state = StormJoinInnerState::FindGetLocal;
+                        }
+                        self.call_tracker.add_call(ctrl, dest);
+                    }
+                    StormJoinInnerState::FindGetLocal => {
+                        self.call_tracker.add_call(ctrl, dest);
+                    }
+                    StormJoinInnerState::FindRegister => {
+                        let arg1 = ctrl.resolve_arg_u8(0);
+                        if ctx.and_const(arg1, 0xff) == ctx.and_const(self.slot, 0xff) {
+                            self.result.storm_register_slot_name = Some(dest);
+                            self.state = StormJoinInnerState::FindDrain;
+                            return;
+                        }
+                        self.call_tracker.add_call(ctrl, dest);
+                    }
+                    StormJoinInnerState::FindDrain => {
+                        if !self.checked_drain.contains(&dest) {
+                            self.checked_drain.push(dest);
+                            if is_snet_drain_deferred_queue(self.actx, dest) {
+                                self.result.snet_drain_deferred_queue = Some(dest);
+                                ctrl.end_analysis();
+                                return;
+                            }
+                        }
+                        self.call_tracker.add_call(ctrl, dest);
+                    }
+                }
+            }
+            Operation::Jump { condition, to } => {
+                // The success tail (get_local + slot store + register) sits behind turn-wait
+                // poll gates: `cmp [turns_ready_global], 0; jne success`. The global reads as its
+                // static 0, so scarf resolves the branch to a constant and prunes the success
+                // edge. While hunting for get_local, also queue the taken side of any statically-
+                // resolved forward jump so execution still reaches the tail.
+                if self.state == StormJoinInnerState::FindGetLocal &&
+                    self.forced_branches < 0x40 &&
+                    ctrl.resolve(condition).if_constant().is_some()
+                {
+                    if let Some(to) = ctrl.resolve_va(to) {
+                        if to.as_u64() > ctrl.address().as_u64() {
+                            self.forced_branches += 1;
+                            ctrl.add_branch_with_current_state(to);
+                        }
+                    }
+                }
+            }
+            Operation::Move(DestOperand::Memory(ref mem), value) => {
+                if self.state == StormJoinInnerState::FindGetLocal &&
+                    matches!(mem.size, MemAccessSize::Mem16 | MemAccessSize::Mem8)
+                {
+                    let ctx = ctrl.ctx();
+                    let dest = ctrl.resolve_mem(mem);
+                    let (base, offset) = dest.address();
+                    if offset == session_player_slot_offset::<E>() {
+                        let stored = ctrl.resolve(value);
+                        let slot_match = stored == self.slot ||
+                            ctx.and_const(stored, 0xff) == ctx.and_const(self.slot, 0xff);
+                        if slot_match {
+                            if let Some(func) = base.if_custom()
+                                .and_then(|id| self.call_tracker.custom_id_to_func(id))
+                            {
+                                self.result.get_local_storm_session_player = Some(func);
+                                self.state = StormJoinInnerState::FindRegister;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
 pub(crate) fn chk_init_players<'e, E: ExecutionState<'e>>(
     analysis: &AnalysisCtx<'e, E>,
     chk_callbacks: E::VirtualAddress,

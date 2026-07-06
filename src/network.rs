@@ -1122,6 +1122,115 @@ impl<'acx, 'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for
     }
 }
 
+// find_storm_session_player scans the session-player list for the node whose slot field
+// ([node + 0x21a]) equals the requested slot, returning that node or null. storm_receive_turns
+// calls it (in several places) passing a slot value. The callee is recognised by a jump whose
+// condition compares the +0x21a slot field of a list node against the function's own first
+// argument (masked to slot width). Comparing the slot field against the *argument* -- rather than
+// against a constant -- is what distinguishes it from sibling scan helpers, and 0x21a is a
+// serialized struct field offset that survives recompiles.
+pub(crate) fn find_storm_session_player<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    storm_receive_turns: E::VirtualAddress,
+) -> Option<E::VirtualAddress> {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let mut analyzer = FindStormSessionPlayerCaller::<E> {
+        result: None,
+        checked: BumpVec::new_in(&actx.bump),
+        actx,
+    };
+    FuncAnalysis::new(binary, ctx, storm_receive_turns).analyze(&mut analyzer);
+    analyzer.result
+}
+
+struct FindStormSessionPlayerCaller<'acx, 'e, E: ExecutionState<'e>> {
+    result: Option<E::VirtualAddress>,
+    checked: BumpVec<'acx, E::VirtualAddress>,
+    actx: &'acx AnalysisCtx<'e, E>,
+}
+
+impl<'acx, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for
+    FindStormSessionPlayerCaller<'acx, 'e, E>
+{
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        if let Operation::Call(dest) = *op {
+            if let Some(dest) = ctrl.resolve_va(dest) {
+                if !self.checked.contains(&dest) {
+                    self.checked.push(dest);
+                    if is_find_storm_session_player(self.actx, dest) {
+                        self.result = Some(dest);
+                        ctrl.end_analysis();
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn is_find_storm_session_player<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    func: E::VirtualAddress,
+) -> bool {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let mut analyzer = IsFindStormSessionPlayer::<E> {
+        result: false,
+        budget: 0x1000,
+        arg1: actx.arg_cache.on_entry(0),
+        phantom: Default::default(),
+    };
+    FuncAnalysis::new(binary, ctx, func).analyze(&mut analyzer);
+    analyzer.result
+}
+
+struct IsFindStormSessionPlayer<'e, E: ExecutionState<'e>> {
+    result: bool,
+    budget: u32,
+    arg1: Operand<'e>,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for IsFindStormSessionPlayer<'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        if self.budget == 0 {
+            ctrl.end_analysis();
+            return;
+        }
+        self.budget -= 1;
+        if let Operation::Jump { condition, .. } = *op {
+            let condition = ctrl.resolve(condition);
+            if let Some((l, r, _)) = condition.if_arithmetic_eq_neq() {
+                let slot_offset = crate::game_init::session_player_slot_offset::<E>();
+                // One side reads a node slot field; the other is arg1 (the slot the caller asked
+                // for), read from the arg location at whatever width.
+                let field = [(l, r), (r, l)].into_iter().find_map(|(field, other)| {
+                    let mem = field.if_mem8().or_else(|| field.if_mem16())?;
+                    if mem.address().1 != slot_offset {
+                        return None;
+                    }
+                    let same_arg_addr = match (other.if_memory(), self.arg1.if_memory()) {
+                        (Some(a), Some(b)) => a.address() == b.address(),
+                        _ => false,
+                    };
+                    let matches = other == self.arg1 ||
+                        other.unwrap_and_mask() == self.arg1 ||
+                        same_arg_addr;
+                    matches.then_some(())
+                });
+                if field.is_some() {
+                    self.result = true;
+                    ctrl.end_analysis();
+                }
+            }
+        }
+    }
+}
+
 impl<'acx, 'a, 'e, E: ExecutionState<'e>> SnetRecvAnalyzer<'acx, 'a, 'e, E> {
     fn check_player_list_head_bit1(&self, condition: Operand<'e>) -> Option<Operand<'e>> {
         let ctx = self.ctx;

@@ -1627,7 +1627,10 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 GetUnitSkin | JoinCustomGame | FindFileWithCrc | ForFilesInDir |
                 SimpleFileMatchCallback | GetLocales | InitGameMap | SaveReplay |
                 AdvanceTurnTimerAndStepNetwork | RecomputeTurnDurations |
-                RandomizePlayerColors | NetPlayerCount => continue,
+                RandomizePlayerColors | NetPlayerCount | StormJoinGame |
+                StormSessionPlayerLookupOrCreate | GetLocalStormSessionPlayer |
+                StormRegisterSlotName | FindStormSessionPlayer | SnetDrainDeferredQueue =>
+                    continue,
             _ => (),
         }
         assert!(result.is_some(), "Missing {}", addr.name());
@@ -1649,7 +1652,7 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 Images | TilesetCv5 | TilesetData | TilesetVx4Ex | TileDefaultFlags |
                 MinitileGraphics | MinitileData | FoliageState | CreepOriginalTiles |
                 CreepTileBorders | CursorScaleFactor | TurnDurationBySpeed |
-                TurnTimerAccumulator | NetworkWaitingForTurns |
+                TurnTimerAccumulator | NetworkWaitingForTurns | StormLocalPlayerSlot |
                 PlayerColorPreference =>
             {
                 continue;
