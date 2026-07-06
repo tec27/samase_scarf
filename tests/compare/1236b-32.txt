@@ -101,6 +101,7 @@ find_game_type_template: 00710730
 find_nearest_unit_around_unit: 006ca9a0
 find_nearest_unit_in_area: 006caa90
 find_nearest_unit_in_area_point: 006cabc0
+find_storm_session_player: 007c7410
 find_unit_borders_rect: 005b01c0
 find_unit_for_click: 007daa50
 finish_unit_post: 005b5850
@@ -123,6 +124,7 @@ get_choke_point_regions: 0068b610
 get_creep_spread_area: 009bdc80
 get_force_color: 0077ac70
 get_images_rel: 0057bc70
+get_local_storm_session_player: 007c7480
 get_locales: 00622950
 get_mouse_x: 006c3a00
 get_mouse_y: 006c3a10
@@ -263,6 +265,7 @@ show_unit: 005b0e40
 simple_file_match_callback: 007a2530
 single_player_map_end: 007d5210
 single_player_start: 0075dc20
+snet_drain_deferred_queue: 007c8c30
 snet_initialize_provider: 007cb3f0
 snet_recv_packets: 007ccf00
 snet_send_packets: 007ca210
@@ -301,7 +304,10 @@ stop_creep_disappearing_at_building: 007d18a0
 stop_moving: 005d6640
 stop_targeting: 007ce930
 storm_create_game: 007ca6c0
+storm_join_game: 007cba70
 storm_receive_turns: 007cc9a0
+storm_register_slot_name: 007c8140
+storm_session_player_lookup_or_create: 007c7350
 switch_construction_image: 005b1390
 targeting_lclick: 0060f000
 targeting_rclick: 006d9650
@@ -578,6 +584,7 @@ step_ai_regions_player: Mem32[101e984]
 step_ai_regions_region: Mem32[101e988]
 step_game_frames: Mem32[f66d68]
 storm_command_user: Mem32[f6cce0]
+storm_local_player_slot: Mem8[f72b14]
 storm_turn_base: Mem32[11fdf14]
 storm_turn_lag_threshold: Mem32[f72af4]
 storm_turn_min_interval: Mem32[f72aec]
