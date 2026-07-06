@@ -378,6 +378,7 @@ results! {
         StatusScreenEventHandler => status_screen_event_handler => cache_multi_wireframes,
         MinimapDialogEventHandler => minimap_dialog_event_handler => cache_minimap_event_handler,
         NetFormatTurnRate => net_format_turn_rate,
+        NetPlayerCount => net_player_count => cache_net_player_count,
         LoadReplayScenarioChk => load_replay_scenario_chk => cache_init_map_from_path,
         SfileCloseArchive => sfile_close_archive => cache_init_map_from_path,
         OpenMapMpq => open_map_mpq => cache_init_map_from_path,
@@ -2585,6 +2586,15 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
     fn net_format_turn_rate(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<E::VirtualAddress> {
         self.cache_many_addr(AddressAnalysis::NetFormatTurnRate,
                              |s| s.cache_net_format_turn_rate(actx))
+    }
+
+    fn cache_net_player_count(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::NetPlayerCount;
+        self.cache_single_address(NetPlayerCount, |s| {
+            let game = s.game(actx)?;
+            let funcs = s.function_finder();
+            network::net_player_count(actx, &funcs, game)
+        });
     }
 
     fn process_commands(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<E::VirtualAddress> {

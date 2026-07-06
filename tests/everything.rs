@@ -1627,7 +1627,7 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 GetUnitSkin | JoinCustomGame | FindFileWithCrc | ForFilesInDir |
                 SimpleFileMatchCallback | GetLocales | InitGameMap | SaveReplay |
                 AdvanceTurnTimerAndStepNetwork | RecomputeTurnDurations |
-                RandomizePlayerColors => continue,
+                RandomizePlayerColors | NetPlayerCount => continue,
             _ => (),
         }
         assert!(result.is_some(), "Missing {}", addr.name());
@@ -2146,6 +2146,15 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
         assert!(start_udp_server.is_some());
     } else {
         assert!(start_udp_server.is_none());
+    }
+
+    // net_player_count is anchored on the "strERROR_GENERAL_NETWORK" string, which was introduced
+    // in 1.23.2; earlier builds lack the string entirely, so the analysis can't resolve them.
+    let net_player_count = analysis.net_player_count();
+    if minor_version > 23 || (minor_version == 23 && patch_version >= 2) {
+        assert!(net_player_count.is_some(), "Missing net_player_count");
+    } else {
+        assert!(net_player_count.is_none());
     }
 
     // 1.23.0 added input abstraction
