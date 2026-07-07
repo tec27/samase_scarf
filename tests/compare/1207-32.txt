@@ -37,6 +37,7 @@ ai_update_attack_target: 0067e8f0
 ai_update_building_placement_state: 007ff940
 alliances_allowed: 00775aa0
 anim_asset_change_cb: 00657b20
+apply_lobby_force_cmd: 007b3b00
 apply_pending_player_leaves: 007db7f0
 attack_unit: 006828a0
 building_placement_lclick: 007eca30
