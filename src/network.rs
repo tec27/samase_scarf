@@ -962,6 +962,112 @@ impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for StepLobbyStateAna
     }
 }
 
+// apply_lobby_force_cmd is the handler for async lobby command class 0x4A (the per-slot
+// force/alliance/vision apply). Its only caller is the async lobby command dispatcher
+// (process_async_lobby_command), which switches on (class_byte - 0x3A) through a byte lookup
+// table into a dword jump table. The 0x4A case checks the record length == 0x3F (== 63, the
+// serialized body size) and then directly calls apply_lobby_force_cmd(record, guard). We locate
+// the dispatcher's switch the same way command_lobby_map_p2p does for class 0x4F, branch to the
+// 0x4A case, steer onto the length == 0x3F branch to confirm the case, and take the following
+// call. The switch-case shape and the 0x3F length check survive recompiles even though the raw
+// addresses and the record layout do not.
+pub(crate) fn apply_lobby_force_cmd<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    process_async_lobby_command: E::VirtualAddress,
+) -> Option<E::VirtualAddress> {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let mut result = None;
+    let mut analyzer = ApplyLobbyForceCmd::<E> {
+        result: &mut result,
+        state: ApplyLobbyForceCmdState::FindSwitch,
+        limit: 0,
+    };
+    FuncAnalysis::new(binary, ctx, process_async_lobby_command).analyze(&mut analyzer);
+    result
+}
+
+struct ApplyLobbyForceCmd<'a, 'e, E: ExecutionState<'e>> {
+    result: &'a mut Option<E::VirtualAddress>,
+    state: ApplyLobbyForceCmdState,
+    limit: u8,
+}
+
+#[derive(Eq, PartialEq, Copy, Clone)]
+enum ApplyLobbyForceCmdState {
+    /// Find the dispatcher switch jump, branch to the 0x4A case.
+    FindSwitch,
+    /// In the 0x4A case, steer onto the record-length == 0x3F branch.
+    FindLenCheck,
+    /// The next resolved call is apply_lobby_force_cmd.
+    FindCall,
+}
+
+impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for ApplyLobbyForceCmd<'a, 'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        let ctx = ctrl.ctx();
+        match self.state {
+            ApplyLobbyForceCmdState::FindSwitch => {
+                if let Operation::Jump { condition, to } = *op {
+                    if condition == ctx.const_1() && to.if_constant().is_none() {
+                        let to = ctrl.resolve(to);
+                        let exec_state = ctrl.exec_state();
+                        if let Some(switch) = CompleteSwitch::new(to, ctx, exec_state) {
+                            let binary = ctrl.binary();
+                            if let Some(branch) = switch.branch(binary, ctx, 0x4a) {
+                                ctrl.clear_unchecked_branches();
+                                ctrl.continue_at_address(branch);
+                                self.state = ApplyLobbyForceCmdState::FindLenCheck;
+                                self.limit = 8;
+                            }
+                        }
+                    }
+                }
+            }
+            ApplyLobbyForceCmdState::FindLenCheck => {
+                if let Operation::Jump { condition, to } = *op {
+                    let condition = ctrl.resolve(condition);
+                    if let Some((l, r, is_eq)) = condition.if_arithmetic_eq_neq() {
+                        if l.if_constant() == Some(0x3f) || r.if_constant() == Some(0x3f) {
+                            // Continue on the record-length == 0x3F side; the apply call follows.
+                            ctrl.clear_unchecked_branches();
+                            ctrl.continue_at_eq_address(is_eq, to);
+                            self.state = ApplyLobbyForceCmdState::FindCall;
+                            self.limit = 8;
+                            return;
+                        }
+                    }
+                    if self.limit == 0 {
+                        ctrl.end_analysis();
+                    } else {
+                        self.limit -= 1;
+                    }
+                }
+            }
+            ApplyLobbyForceCmdState::FindCall => {
+                match *op {
+                    Operation::Call(dest) => {
+                        if let Some(dest) = ctrl.resolve_va(dest) {
+                            *self.result = Some(dest);
+                            ctrl.end_analysis();
+                        }
+                    }
+                    Operation::Jump { .. } => {
+                        if self.limit == 0 {
+                            ctrl.end_analysis();
+                        } else {
+                            self.limit -= 1;
+                        }
+                    }
+                    _ => (),
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn analyze_snet_recv_packets<'e, E: ExecutionState<'e>>(
     actx: &AnalysisCtx<'e, E>,
     snet_recv_packets: E::VirtualAddress,

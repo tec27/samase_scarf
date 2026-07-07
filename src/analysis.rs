@@ -550,6 +550,8 @@ results! {
         ProcessAsyncLobbyCommand => process_async_lobby_command => cache_step_lobby_state,
         // a1 data, a2 len, a3 player
         CommandLobbyMapP2p => command_lobby_map_p2p => cache_step_lobby_state,
+        // __cdecl(record /*0x3F-byte body*/, guard); the async lobby class 0x4A handler
+        ApplyLobbyForceCmd => apply_lobby_force_cmd => cache_apply_lobby_force_cmd,
         // a1 dir, a2 wildcard_str, a3 callback, a4, a5 recurse, a6 callback_ctx, a7 ctx2
         // callback: a1 dir_name, a2 file_entry, a3 ctx, a4 ctx2
         ForFilesInDir => for_files_in_dir => cache_find_file_with_crc,
@@ -5375,6 +5377,24 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
                     [],
                 ))
             })
+    }
+
+    fn process_async_lobby_command(
+        &mut self,
+        actx: &AnalysisCtx<'e, E>,
+    ) -> Option<E::VirtualAddress> {
+        self.cache_many_addr(
+            AddressAnalysis::ProcessAsyncLobbyCommand,
+            |s| s.cache_step_lobby_state(actx),
+        )
+    }
+
+    fn cache_apply_lobby_force_cmd(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::ApplyLobbyForceCmd;
+        self.cache_single_address(ApplyLobbyForceCmd, |s| {
+            let process_async_lobby_command = s.process_async_lobby_command(actx)?;
+            network::apply_lobby_force_cmd(actx, process_async_lobby_command)
+        });
     }
 
     fn cache_find_file_with_crc(&mut self, actx: &AnalysisCtx<'e, E>) {
