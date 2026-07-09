@@ -1703,7 +1703,7 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 LastFreePlacementRect | TilesetIndexedMapTiles | Vx4MapTiles | RepulseState |
                 TerrainFramebuf | StatportVideos | StatportTalkingPortraitActive |
                 StatportVideoId | NgdpEnabled | MinimapColorMode | MinimapTerrainHidden |
-                OutgoingCommandLength |
+                OutgoingCommandLength | ChatBoxMode |
                 BuiltinTurnLatency | GameFrameCount | StormTurnBase | StormTurnMinInterval |
                 StormTurnLagThreshold | GameTypeTemplates | MatchmakerSessionCount =>
             {
