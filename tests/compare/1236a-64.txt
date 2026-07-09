@@ -366,6 +366,7 @@ base_anim_set: 140e47e00
 bnet_controller: (Mem64[140da8068] ^ a4eb9794f970326b)
 builtin_turn_latency: Mem32[1410640e8]
 campaigns: 140da78e0
+chat_box_mode: Mem8[1410783e0]
 cheat_flags: Mem32[141027548]
 chk_init_players: 1410672f0
 client_selection: 141077d70

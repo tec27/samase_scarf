@@ -972,6 +972,11 @@ results! {
         MatchmakerString => matchmaker_string => cache_alliances_allowed,
         // Mem8 storm session slot (0xff = not in a game); storm_join_game requires 0xff at entry.
         StormLocalPlayerSlot => storm_local_player_slot => cache_storm_join_game,
+        // Mem8 in-game chat send-scope. 0 = chat box closed, 1 = single-player local,
+        // 2 = everyone (InGameAll), 3 = allies (InGameAllies), 4 = specific player
+        // (InGameSpecificPlayer), 5 = observers (InGameObservers). toggle_chat_box reads it,
+        // subtracts 2, and switches on the result to pick the InGame* channel-name label.
+        ChatBoxMode => chat_box_mode => cache_chat_box_mode,
     }
 }
 
@@ -3473,6 +3478,13 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
         self.cache_single_address(FindStormSessionPlayer, |s| {
             let storm_receive_turns = s.storm_receive_turns(actx)?;
             network::find_storm_session_player(actx, storm_receive_turns)
+        });
+    }
+
+    fn cache_chat_box_mode(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use OperandAnalysis::ChatBoxMode;
+        self.cache_single_operand(ChatBoxMode, |s| {
+            dialog::chat_box_mode(actx, &s.function_finder())
         });
     }
 
