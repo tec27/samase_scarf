@@ -253,6 +253,12 @@ results! {
         ResetUiEventHandlers => reset_ui_event_handlers => cache_ui_event_handlers,
         ClampZoom => clamp_zoom,
         DrawMinimapUnits => draw_minimap_units,
+        // draw_minimap_units calls draw_minimap_player_units(player) for players 8..12
+        // (drawing resources with the neutral color), and
+        // draw_minimap_main_player_units(player) for other non-local players.
+        DrawMinimapPlayerUnits => draw_minimap_player_units => cache_minimap_player_draw_funcs,
+        DrawMinimapMainPlayerUnits => draw_minimap_main_player_units =>
+            cache_minimap_player_draw_funcs,
         InitNetPlayer => init_net_player => cache_net_players,
         ScMain => sc_main => cache_game_init,
         MainMenuEntryHook => mainmenu_entry_hook => cache_game_init,
@@ -5471,6 +5477,19 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
                 Some((
                     [r.minimap_dialog_event_handler],
                     [r.minimap_color_mode, r.minimap_terrain_hidden],
+                ))
+            })
+    }
+
+    fn cache_minimap_player_draw_funcs(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        self.cache_many(&[DrawMinimapPlayerUnits, DrawMinimapMainPlayerUnits], &[],
+            |s| {
+                let draw_minimap_units = s.draw_minimap_units(actx)?;
+                let result = minimap::player_draw_funcs(actx, draw_minimap_units);
+                Some((
+                    [result.draw_minimap_player_units, result.draw_minimap_main_player_units],
+                    [],
                 ))
             })
     }
