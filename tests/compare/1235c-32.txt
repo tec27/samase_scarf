@@ -84,6 +84,8 @@ draw_f10_menu_tooltip: 00793ee0
 draw_game_layer: 005fbd70
 draw_graphic_layers: 00964230
 draw_image: 00571300
+draw_minimap_main_player_units: 00716a50
+draw_minimap_player_units: 007167e0
 draw_minimap_units: 00714320
 draw_terrain: 0065fff0
 draw_tooltip_layer: 005f1430
