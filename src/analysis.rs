@@ -311,7 +311,10 @@ results! {
         GetImagesRel => get_images_rel => cache_image_loading,
         InitRealTimeLighting => init_real_time_lighting => cache_images_loaded,
         StepActiveUnitFrame => step_active_unit_frame => cache_step_objects,
+        StepActiveUnitFrameOuterCall => step_active_unit_frame_outer_call => cache_step_objects,
+        StepActiveUnitBodyOuterCall => step_active_unit_body_outer_call => cache_step_objects,
         StepHiddenUnitFrame => step_hidden_unit_frame => cache_step_objects,
+        StepHiddenUnitFrameOuterCall => step_hidden_unit_frame_outer_call => cache_step_objects,
         StepBulletFrame => step_bullet_frame => cache_step_objects,
         StepBullets => step_bullets => cache_step_objects,
         // a1 x_tile, a2 y_tile, a3 cb, a4 cb_param
@@ -4415,8 +4418,10 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
         use AddressAnalysis::*;
         use OperandAnalysis::*;
         self.cache_many(&[
-            StepActiveUnitFrame, StepHiddenUnitFrame, StepBulletFrame, RevealUnitArea,
-            UpdateUnitVisibility, UpdateCloakState, StepBullets, CreepModifyState,
+            StepActiveUnitFrame, StepActiveUnitFrameOuterCall,
+            StepActiveUnitBodyOuterCall, StepHiddenUnitFrame, StepHiddenUnitFrameOuterCall,
+            StepBulletFrame, RevealUnitArea, UpdateUnitVisibility, UpdateCloakState,
+            StepBullets, CreepModifyState,
             ForEachSurroundingile, CreepUpdateBorderForTile, GetCreepSpreadArea,
         ], &[
             VisionUpdateCounter, VisionUpdated, FirstDyingUnit, FirstRevealer, FirstInvisibleUnit,
@@ -4441,9 +4446,12 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
                 active_iscript_unit,
             );
             Some(([
-                result.step_active_frame, result.step_hidden_frame, result.step_bullet_frame,
-                result.reveal_area, result.update_unit_visibility, result.update_cloak_state,
-                result.step_bullets, result.creep_modify_state, result.for_each_surrounding_tile,
+                result.step_active_frame, result.step_active_frame_outer_call,
+                result.step_active_body_outer_call,
+                result.step_hidden_frame, result.step_hidden_frame_outer_call,
+                result.step_bullet_frame, result.reveal_area, result.update_unit_visibility,
+                result.update_cloak_state, result.step_bullets, result.creep_modify_state,
+                result.for_each_surrounding_tile,
                 result.creep_update_border_for_tile, result.get_creep_spread_area,
             ], [
                 result.vision_update_counter, result.vision_updated, result.first_dying_unit,
