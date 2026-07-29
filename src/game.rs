@@ -38,7 +38,10 @@ pub struct Limits<'e, Va: VirtualAddress> {
 
 pub(crate) struct StepObjectsAnalysis<'e, Va: VirtualAddress> {
     pub step_active_frame: Option<Va>,
+    pub step_active_frame_outer_call: Option<Va>,
+    pub step_active_body_outer_call: Option<Va>,
     pub step_hidden_frame: Option<Va>,
+    pub step_hidden_frame_outer_call: Option<Va>,
     pub step_bullet_frame: Option<Va>,
     pub step_bullets: Option<Va>,
     pub reveal_area: Option<Va>,
@@ -1026,7 +1029,10 @@ pub(crate) fn analyze_step_objects<'e, E: ExecutionState<'e>>(
 ) -> StepObjectsAnalysis<'e, E::VirtualAddress> {
     let mut result = StepObjectsAnalysis {
         step_active_frame: None,
+        step_active_frame_outer_call: None,
+        step_active_body_outer_call: None,
         step_hidden_frame: None,
+        step_hidden_frame_outer_call: None,
         step_bullet_frame: None,
         step_bullets: None,
         reveal_area: None,
@@ -1186,6 +1192,9 @@ enum StepObjectsAnalysisState {
     FreeUnits,
     // First call where active_iscript_unit is set to first_active_unit and ecx is that too
     StepActiveUnitFrame,
+    // Next call with the same unit state. The outer loop has already cached unit.next.
+    // This body runs timers, orders, subunits, and iscript.
+    StepActiveUnitBody,
     // Same as first_dying_unit, write something new to active_iscript_unit.
     // Calls reveal_area(this = first_revealer)
     FirstRevealer,
@@ -1711,24 +1720,57 @@ impl<'a, 'acx, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for
                 }
             }
             StepObjectsAnalysisState::StepActiveUnitFrame |
+                StepObjectsAnalysisState::StepActiveUnitBody |
                 StepObjectsAnalysisState::StepHiddenUnitFrame =>
             {
                 if let Operation::Call(dest) = *op {
                     if let Some(dest) = ctrl.resolve_va(dest) {
                         let this = ctrl.resolve_register(1);
-                        let cmp = if self.state == StepObjectsAnalysisState::StepActiveUnitFrame {
-                            self.first_active_unit
-                        } else {
+                        let cmp = if self.state == StepObjectsAnalysisState::StepHiddenUnitFrame {
                             self.first_hidden_unit
+                        } else {
+                            self.first_active_unit
                         };
                         if this == cmp {
                             let active_iscript_unit = ctrl.resolve(self.active_iscript_unit);
-                            if active_iscript_unit == cmp {
+                            let cache_before = self.state !=
+                                StepObjectsAnalysisState::StepActiveUnitFrame;
+                            let successor_is_cached = if cache_before {
+                                // At a cache-before callsite, current.next must still be saved
+                                // in a register. This proves that reading the live link here
+                                // observes the exact value that the outer loop will use.
+                                let pointer_size = E::VirtualAddress::SIZE as u64;
+                                let mem_size = if pointer_size == 4 {
+                                    MemAccessSize::Mem32
+                                } else {
+                                    MemAccessSize::Mem64
+                                };
+                                let successor =
+                                    ctrl.resolve(ctx.mem_any(mem_size, cmp, pointer_size));
+                                let register_count = if pointer_size == 4 { 8 } else { 16 };
+                                (0..register_count).any(|register| {
+                                    ctrl.resolve_register(register) == successor
+                                })
+                            } else {
+                                true
+                            };
+                            if active_iscript_unit == cmp && successor_is_cached {
                                 if self.state == StepObjectsAnalysisState::StepActiveUnitFrame {
                                     self.result.step_active_frame = Some(dest);
+                                    self.result.step_active_frame_outer_call =
+                                        Some(ctrl.address());
                                     self.state = StepObjectsAnalysisState::FirstRevealer;
+                                } else if self.state ==
+                                    StepObjectsAnalysisState::StepActiveUnitBody
+                                {
+                                    self.result.step_active_body_outer_call =
+                                        Some(ctrl.address());
+                                    self.state = StepObjectsAnalysisState::StepHiddenUnitFrame;
+                                    return;
                                 } else {
                                     self.result.step_hidden_frame = Some(dest);
+                                    self.result.step_hidden_frame_outer_call =
+                                        Some(ctrl.address());
                                     self.inline_limit = 0;
                                     self.state = StepObjectsAnalysisState::FirstInvisibleUnit;
                                 }
@@ -1809,7 +1851,7 @@ impl<'a, 'acx, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for
                                     let arg1 = ctrl.resolve_arg_thiscall(0);
                                     if arg1 == ctx.const_0() {
                                         self.result.update_cloak_state = Some(dest);
-                                        self.state = StepObjectsAnalysisState::StepHiddenUnitFrame;
+                                        self.state = StepObjectsAnalysisState::StepActiveUnitBody;
                                         return;
                                     }
                                 }
