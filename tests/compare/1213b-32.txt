@@ -256,7 +256,9 @@ start_cloaking: 00586d80
 start_targeting: 006edde0
 start_udp_server: None
 status_screen_event_handler: 006e0db0
+step_active_unit_body_outer_call: 00594412
 step_active_unit_frame: 005997e0
+step_active_unit_frame_outer_call: 0059436e
 step_ai_script: 005cdb40
 step_ai_scripts: 005cd8d0
 step_bnet_controller: 00717be0
@@ -269,6 +271,7 @@ step_flingy_turning: 0052f2b0
 step_game_logic: 00649900
 step_game_loop: None
 step_hidden_unit_frame: 00599b50
+step_hidden_unit_frame_outer_call: 00594452
 step_iscript: 00535230
 step_iscript_switch: 00536084
 step_lobby_network: 006a8060
