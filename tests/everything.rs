@@ -1629,7 +1629,8 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 AdvanceTurnTimerAndStepNetwork | RecomputeTurnDurations |
                 RandomizePlayerColors | NetPlayerCount | StormJoinGame |
                 StormSessionPlayerLookupOrCreate | GetLocalStormSessionPlayer |
-                StormRegisterSlotName | FindStormSessionPlayer | SnetDrainDeferredQueue =>
+                StormRegisterSlotName | FindStormSessionPlayer | SnetDrainDeferredQueue |
+                RecordTurnSyncSlot =>
                     continue,
             _ => (),
         }
@@ -1653,7 +1654,11 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 MinitileGraphics | MinitileData | FoliageState | CreepOriginalTiles |
                 CreepTileBorders | CursorScaleFactor | TurnDurationBySpeed |
                 TurnTimerAccumulator | NetworkWaitingForTurns | StormLocalPlayerSlot |
-                PlayerColorPreference =>
+                PlayerColorPreference | SyncSlotIndex | SyncCheckKindIndex |
+                SyncCheckKindCount | SyncCheckKinds | SyncMapRowIndex |
+                CapturedMinimapUnitVisionSyncValue | CapturedMinimapMarkerCountSyncValue |
+                CurrentSyncStateByte | CurrentSyncCheckHash | CurrentSyncVisionBytes |
+                AiSpendingPlayerIndex =>
             {
                 continue;
             }
@@ -1704,7 +1709,9 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 StatportVideoId | NgdpEnabled | MinimapColorMode | MinimapTerrainHidden |
                 OutgoingCommandLength | ChatBoxMode |
                 BuiltinTurnLatency | GameFrameCount | StormTurnBase | StormTurnMinInterval |
-                StormTurnLagThreshold | GameTypeTemplates | MatchmakerSessionCount =>
+                StormTurnLagThreshold | GameTypeTemplates | MatchmakerSessionCount |
+                WorkerAiFreeList | BuildingAiFreeList | AiTownFreeList | AiScriptFreeList |
+                MilitaryAiFreeList | GuardAiFreeList =>
             {
                 check_global_opt(result, binary, op.name());
             }
@@ -1722,7 +1729,11 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 RunDialogStack | LurkerHits | ResourceAreas | HpBarImages | HpBarState |
                 SelectionCircles | PlacementImages | PlacementRects | ShieldOverlays | ImagesRel |
                 SnetLocalPlayerList | SnetPlayerList | NgdpInstance | OutgoingCommandBuffer |
-                ForceColors | PendingLeaveReason | MatchmakerString =>
+                ForceColors | PendingLeaveReason | MatchmakerString |
+                LocalSelection | SelectionHotkeyLastUsedFrames |
+                WorkerAiPoolStorage | BuildingAiPoolStorage | AiTownPoolStorage |
+                AiScriptPoolStorage | MilitaryAiPoolStorage | GuardAiPoolStorage |
+                DcreepStatePool =>
             {
                 check_global_struct_opt(result, binary, op.name());
             }
