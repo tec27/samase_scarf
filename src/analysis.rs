@@ -594,6 +594,7 @@ results! {
         StormReceiveTurns => storm_receive_turns => cache_storm_turn_globals,
         ApplyPendingPlayerLeaves => apply_pending_player_leaves =>
             cache_apply_pending_player_leaves,
+        FindStormSessionPlayer => find_storm_session_player => cache_find_storm_session_player,
     }
 }
 
@@ -3292,6 +3293,14 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
         })
     }
 
+    fn cache_find_storm_session_player(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::FindStormSessionPlayer;
+        self.cache_single_address(FindStormSessionPlayer, |s| {
+            let storm_receive_turns = s.storm_receive_turns(actx)?;
+            network::find_storm_session_player(actx, storm_receive_turns)
+        });
+    }
+
     fn set_status_screen_tooltip(
         &mut self,
         actx: &AnalysisCtx<'e, E>,
@@ -5353,6 +5362,12 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
     }
     fn receive_storm_turns(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<E::VirtualAddress> {
         self.cache_many_addr(AddressAnalysis::ReceiveStormTurns, |s| s.cache_step_network(actx))
+    }
+
+    fn storm_receive_turns(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<E::VirtualAddress> {
+        self.cache_many_addr(AddressAnalysis::StormReceiveTurns, |s| {
+            s.cache_storm_turn_globals(actx)
+        })
     }
 
     fn cache_storm_turn_globals(&mut self, actx: &AnalysisCtx<'e, E>) {

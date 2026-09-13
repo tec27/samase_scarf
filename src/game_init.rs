@@ -2560,6 +2560,13 @@ impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FindSnetInitProvi
     }
 }
 
+/// Offset of the u16 "assigned slot" field within a Storm session-player node (0xffff = none
+/// yet). The struct is pointer-heavy, so this field is at 0x21a on 32-bit builds and 0x2be on
+/// 64-bit builds.
+pub(crate) fn session_player_slot_offset<'e, E: ExecutionState<'e>>() -> u64 {
+    if E::VirtualAddress::SIZE == 4 { 0x21a } else { 0x2be }
+}
+
 pub(crate) fn chk_init_players<'e, E: ExecutionState<'e>>(
     analysis: &AnalysisCtx<'e, E>,
     chk_callbacks: E::VirtualAddress,

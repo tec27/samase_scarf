@@ -96,6 +96,7 @@ find_fow_sprite_for_click: 0071e490
 find_nearest_unit_around_unit: 0067e7e0
 find_nearest_unit_in_area: 0067e860
 find_nearest_unit_in_area_point: 0067ea50
+find_storm_session_player: 008d3520
 find_unit_borders_rect: 00579840
 find_unit_for_click: 0076fed0
 finish_unit_post: 00582ca0
