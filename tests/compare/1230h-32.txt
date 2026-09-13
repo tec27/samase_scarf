@@ -640,6 +640,7 @@ turn_timer_accumulator: Mem32[fd53cc]
 ui_consoles: 100fd18
 unique_command_user: Mem32[d9444c]
 unit_count: Mem32[e028dc]
+unit_position_search_entry_count: Mem32[e02820]
 unit_should_reveal_area: Mem32[e02914]
 unit_skin_map: d6dca0
 unit_strength: e2b720
@@ -732,6 +733,11 @@ path_array_extents: 0x20000 bytes, entries of 0x80
 player_ai_size: 0x2740
 trigger_completed_units_cache_size: 0x2ac0
 resource_areas_size: 0x2ee8
+pathing_dynamic_state: pathing + 0x97a1c, 0x38 bytes
+pathing_dynamic_edges[0]: ptr 0x0, count 0x10, capacity 0x18, entry 0x8
+pathing_dynamic_edges[1]: ptr 0x4, count 0x12, capacity 0x1a, entry 0x8
+pathing_dynamic_edges[2]: ptr 0x8, count 0x14, capacity 0x1c, entry 0x8
+pathing_dynamic_edges[3]: ptr 0xc, count 0x16, capacity 0x1e, entry 0x8
 CreateGameScreen.on_multiplayer_create offset: Some(a8)
 Prism vertex shader sets: 0x0
 Prism pixel shader sets: 0x0
