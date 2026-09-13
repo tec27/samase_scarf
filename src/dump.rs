@@ -181,6 +181,36 @@ pub fn dump<'e, E: ExecutionState<'e>>(
             out!(&mut out, "limits.{}: {:?}", name, arr);
         }
 
+        let ai_pools = analysis.ai_pools();
+        let pools = [
+            ("worker_ai", &ai_pools.worker),
+            ("building_ai", &ai_pools.building),
+            ("ai_town", &ai_pools.town),
+            ("ai_script", &ai_pools.script),
+            ("military_ai", &ai_pools.military),
+            ("guard_ai", &ai_pools.guard),
+            ("dcreep_state", &ai_pools.dcreep),
+        ];
+        for (name, pool) in pools {
+            out!(
+                &mut out, "{}_pool_extents: {:#x} entries of {:#x}",
+                name, pool.entry_count, pool.entry_size,
+            );
+        }
+
+        let sizes = analysis.state_block_sizes();
+        out!(&mut out, "pathing_state_size: {:#x}", sizes.pathing_state);
+        out!(
+            &mut out, "path_array_extents: {:#x} bytes, entries of {:#x}",
+            sizes.path_array, sizes.path_entry,
+        );
+        out!(&mut out, "player_ai_size: {:#x}", sizes.player_ai);
+        out!(
+            &mut out, "trigger_completed_units_cache_size: {:#x}",
+            sizes.trigger_completed_units_cache,
+        );
+        out!(&mut out, "resource_areas_size: {:#x}", sizes.resource_areas);
+
         let offset = analysis.create_game_dialog_vtbl_on_multiplayer_create();
         out!(&mut out, "CreateGameScreen.on_multiplayer_create offset: {:x?}", offset);
 
