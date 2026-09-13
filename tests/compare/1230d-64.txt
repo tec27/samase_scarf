@@ -94,6 +94,8 @@ draw_tooltip_layer: 140206180
 drop_powerup: 1401a5d70
 duplicate_sprite: 14017ab20
 end_collision_tracking: 140184840
+engine_alloc: 14055eea0
+engine_free: 14055eef0
 file_exists: 140150e60
 file_read_fatal_error: 14059e250
 find_file_with_crc: None

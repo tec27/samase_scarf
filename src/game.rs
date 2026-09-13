@@ -522,6 +522,104 @@ impl<'e, E: ExecutionState<'e>> AllocatorFromSMemAlloc<'e, E> {
     }
 }
 
+pub(crate) struct EngineAllocFuncs<Va: VirtualAddress> {
+    pub engine_alloc: Option<Va>,
+    pub engine_free: Option<Va>,
+}
+
+/// Finds the allocation function pair that the engine uses besides the `allocator` vtable
+/// object. They are plain functions `alloc(size, tag, tag2, flags)` /
+/// `free(ptr, tag, tag2, flags)` over the same OS heap; pathing, AI regions, replay
+/// recording and save/load allocate through them.
+///
+/// Anchored on the replay data buffer growth helper reached from add_to_replay_data: it
+/// allocates `replay_data.capacity + 0x2710` bytes, copies the old buffer over and frees it.
+/// 0x2710 is the growth step of that algorithm, and the free is told apart from the copy by
+/// taking the old buffer pointer as its first argument (the copy takes it as second), so
+/// neither a struct field offset nor the order of the calls is assumed. The helper sits one
+/// or two calls deep depending on build, and both halves must be found in the same function
+/// so that a wrapper on the way there cannot contribute half of the pair.
+pub(crate) fn engine_alloc_funcs<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    add_to_replay_data: E::VirtualAddress,
+) -> EngineAllocFuncs<E::VirtualAddress> {
+    let mut result = EngineAllocFuncs {
+        engine_alloc: None,
+        engine_free: None,
+    };
+    let mut analyzer = EngineAllocAnalyzer::<E> {
+        result: &mut result,
+        inline_depth: 0,
+        inline_limit: 8,
+        buffer_owner: None,
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(actx.binary, actx.ctx, add_to_replay_data);
+    analysis.analyze(&mut analyzer);
+    result
+}
+
+struct EngineAllocAnalyzer<'a, 'e, E: ExecutionState<'e>> {
+    result: &'a mut EngineAllocFuncs<E::VirtualAddress>,
+    inline_depth: u8,
+    inline_limit: u8,
+    /// Base of the struct that holds both the capacity the allocation size is derived from
+    /// and the old buffer pointer which gets freed; set once the allocation call is found.
+    buffer_owner: Option<Operand<'e>>,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for EngineAllocAnalyzer<'a, 'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        let Operation::Call(dest) = *op else {
+            return;
+        };
+        let arg1 = ctrl.resolve_arg(0);
+        if let Some(owner) = self.buffer_owner {
+            // The old buffer is read from the same struct the capacity came from; the copy
+            // that precedes this takes the freshly allocated block as its first argument, so
+            // only the free matches here.
+            let frees_old_buffer = arg1.if_memory()
+                .is_some_and(|mem| mem.address().0 == owner);
+            if frees_old_buffer {
+                if let Some(dest) = ctrl.resolve_va(dest) {
+                    self.result.engine_free = Some(dest);
+                    ctrl.end_analysis();
+                }
+            }
+            return;
+        }
+        let owner = arg1.unwrap_and_mask()
+            .if_arithmetic_add_const(0x2710)
+            .and_then(|x| x.unwrap_and_mask().if_memory())
+            .map(|mem| mem.address().0);
+        if let Some(owner) = owner {
+            if let Some(dest) = ctrl.resolve_va(dest) {
+                self.result.engine_alloc = Some(dest);
+                self.buffer_owner = Some(owner);
+                return;
+            }
+        }
+        if self.inline_depth < 2 && self.inline_limit != 0 {
+            if let Some(dest) = ctrl.resolve_va(dest) {
+                self.inline_limit -= 1;
+                self.inline_depth += 1;
+                ctrl.analyze_with_current_state(self, dest);
+                self.inline_depth -= 1;
+                if self.result.engine_free.is_some() {
+                    ctrl.end_analysis();
+                } else {
+                    // Both halves have to be found in the same growth helper.
+                    self.result.engine_alloc = None;
+                    self.buffer_owner = None;
+                }
+            }
+        }
+    }
+}
+
 struct FindSetLimits<'a, 'acx, 'e, E: ExecutionState<'e>> {
     result: &'a mut Limits<'e, E::VirtualAddress>,
     arg_cache: &'a ArgCache<'e, E>,
