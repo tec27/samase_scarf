@@ -596,6 +596,12 @@ results! {
         ApplyPendingPlayerLeaves => apply_pending_player_leaves =>
             cache_apply_pending_player_leaves,
         FindGameTypeTemplate => find_game_type_template => cache_game_type_templates,
+        StormJoinGame => storm_join_game => cache_storm_join_game,
+        StormSessionPlayerLookupOrCreate => storm_session_player_lookup_or_create =>
+            cache_storm_join_game,
+        GetLocalStormSessionPlayer => get_local_storm_session_player => cache_storm_join_game,
+        StormRegisterSlotName => storm_register_slot_name => cache_storm_join_game,
+        SnetDrainDeferredQueue => snet_drain_deferred_queue => cache_storm_join_game,
         StormCreateGame => storm_create_game => cache_storm_create_game,
         FindStormSessionPlayer => find_storm_session_player => cache_find_storm_session_player,
     }
@@ -918,6 +924,8 @@ results! {
         // apply_pending_player_leaves applies and clears on the next synced turn.
         PendingLeaveReason => pending_leave_reason => cache_apply_pending_player_leaves,
         GameTypeTemplates => game_type_templates => cache_game_type_templates,
+        // Mem8 storm session slot (0xff = not in a game); storm_join_game requires 0xff at entry.
+        StormLocalPlayerSlot => storm_local_player_slot => cache_storm_join_game,
     }
 }
 
@@ -3328,6 +3336,23 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
             let single_player_start = s.single_player_start(actx)?;
             game_init::storm_create_game(actx, single_player_start)
         });
+    }
+
+    fn cache_storm_join_game(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        use OperandAnalysis::StormLocalPlayerSlot;
+        self.cache_many(
+            &[StormJoinGame, StormSessionPlayerLookupOrCreate, GetLocalStormSessionPlayer,
+                StormRegisterSlotName, SnetDrainDeferredQueue],
+            &[StormLocalPlayerSlot],
+            |s| {
+                let join_game = s.join_game(actx)?;
+                let result = game_init::storm_join_game(actx, join_game);
+                Some(([result.storm_join_game, result.storm_session_player_lookup_or_create,
+                    result.get_local_storm_session_player, result.storm_register_slot_name,
+                    result.snet_drain_deferred_queue],
+                    [result.storm_local_player_slot]))
+            })
     }
 
     fn cache_find_storm_session_player(&mut self, actx: &AnalysisCtx<'e, E>) {
