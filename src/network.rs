@@ -2,7 +2,11 @@ use bumpalo::collections::Vec as BumpVec;
 
 use scarf::analysis::{self, Control, FuncAnalysis};
 use scarf::exec_state::{ExecutionState, VirtualAddress};
-use scarf::{MemAccessSize, Operand, OperandCtx, Operation, BinarySection, BinaryFile};
+use scarf::operand::ArithOpType;
+use scarf::{
+    DestOperand, MemAccess, MemAccessSize, Operand, OperandCtx, Operation, BinarySection,
+    BinaryFile,
+};
 
 use crate::analysis::{AnalysisCtx};
 use crate::analysis_find::{FunctionFinder, find_bytes, entry_of_until, EntryOf};
@@ -1046,5 +1050,409 @@ impl<'acx, 'a, 'e, E: ExecutionState<'e>> SnetRecvAnalyzer<'acx, 'a, 'e, E> {
                     None
                 }
             })
+    }
+}
+
+/// Globals of the per-turn sync check ring.
+///
+/// Once per turn the game hashes one of a few rotating "check kinds" of the simulation state
+/// into the next slot of the `sync_data` ring and sends a summary of that slot to the other
+/// players, which lets them notice a desync.
+pub struct TurnSyncChecks<'e, Va: VirtualAddress> {
+    /// Fills one ring slot; called once per turn from step_network.
+    pub record_turn_sync_slot: Option<Va>,
+    /// u8 ring cursor, wrapped to 0 at the ring's slot count before the slot is written.
+    pub sync_slot_index: Option<Operand<'e>>,
+    /// u8 cursor into sync_check_kinds, wrapped at sync_check_kind_count.
+    pub sync_check_kind_index: Option<Operand<'e>>,
+    pub sync_check_kind_count: Option<Operand<'e>>,
+    /// u8 array of the check kinds that are rotated through.
+    pub sync_check_kinds: Option<Operand<'e>>,
+    /// Row of map_tile_flags hashed this turn; stepped by one per turn, wraps at map height.
+    pub sync_map_row_index: Option<Operand<'e>>,
+    pub captured_minimap_unit_vision_sync_value: Option<Operand<'e>>,
+    pub captured_minimap_marker_count_sync_value: Option<Operand<'e>>,
+    /// u8 fold of the sprite vision rows that current_sync_check_hash names.
+    pub current_sync_state_byte: Option<Operand<'e>>,
+    /// u32 copied to the slot next to current_sync_state_byte. Despite holding a value the
+    /// receiver checks the fold against, it is the first sprite hline row of the window that
+    /// was folded, not a hash.
+    pub current_sync_check_hash: Option<Operand<'e>>,
+    /// u8 array, one visibility mask per sprite hline row.
+    pub current_sync_vision_bytes: Option<Operand<'e>>,
+}
+
+impl<'e, Va: VirtualAddress> Default for TurnSyncChecks<'e, Va> {
+    fn default() -> Self {
+        TurnSyncChecks {
+            record_turn_sync_slot: None,
+            sync_slot_index: None,
+            sync_check_kind_index: None,
+            sync_check_kind_count: None,
+            sync_check_kinds: None,
+            sync_map_row_index: None,
+            captured_minimap_unit_vision_sync_value: None,
+            captured_minimap_marker_count_sync_value: None,
+            current_sync_state_byte: None,
+            current_sync_check_hash: None,
+            current_sync_vision_bytes: None,
+        }
+    }
+}
+
+/// Finds the turn sync check ring globals, given `sync_data`.
+///
+/// Anchored on the functions referencing sync_data: only the slot writer stores to
+/// `sync_data + index * slot_size` at several offsets inside a single slot, while the command
+/// sender and the peer verifier only read slots. Each of those stores names one of the wanted
+/// globals as its source: the check kind is read out of sync_check_kinds, two more bytes come
+/// from the captured minimap values, and the rest of the slot is filled from the current sync
+/// state (a byte, a dword, and a row array which is either block copied inline or memcpy'd).
+///
+/// The two cursors are recognized from the wraparound comparisons that step them, which have
+/// the same `index + 1` shape and differ in what they are bounded by: the slot cursor by the
+/// ring's slot count, the kind cursor by another global, which is then the kind count.
+/// sync_map_row_index is the global multiplied by the map width to reach the turn's map row.
+pub(crate) fn turn_sync_checks<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    sync_data: Operand<'e>,
+    functions: &FunctionFinder<'_, 'e, E>,
+) -> TurnSyncChecks<'e, E::VirtualAddress> {
+    let mut result = TurnSyncChecks::default();
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let sync_data_addr = match sync_data.if_constant() {
+        Some(s) => s,
+        None => return result,
+    };
+    let funcs = functions.functions();
+    let global_refs = functions.find_functions_using_global(
+        actx,
+        E::VirtualAddress::from_u64(sync_data_addr),
+    );
+    for global_ref in &global_refs {
+        let mut candidate = TurnSyncChecks::default();
+        let entry = entry_of_until(binary, &funcs, global_ref.use_address, |entry| {
+            candidate = TurnSyncChecks::default();
+            let vision_copy = {
+                let mut analyzer = TurnSyncAnalyzer::<E> {
+                    result: &mut candidate,
+                    sync_data_addr,
+                    slot_size: 0,
+                    vision_copy: None,
+                    data_constant: None,
+                    inline_depth: 0,
+                    phantom: Default::default(),
+                };
+                let mut analysis = FuncAnalysis::new(binary, ctx, entry);
+                analysis.analyze(&mut analyzer);
+                analyzer.vision_copy
+            };
+            if let Some((_, address)) = vision_copy {
+                candidate.current_sync_vision_bytes = Some(ctx.constant(address));
+            }
+            let is_slot_writer = candidate.sync_check_kinds.is_some() &&
+                candidate.captured_minimap_unit_vision_sync_value.is_some() &&
+                candidate.captured_minimap_marker_count_sync_value.is_some();
+            match is_slot_writer {
+                true => EntryOf::Ok(()),
+                false => EntryOf::Retry,
+            }
+        }).into_option_with_entry().map(|x| x.0);
+        if let Some(entry) = entry {
+            candidate.record_turn_sync_slot = Some(entry);
+            result = candidate;
+            break;
+        }
+    }
+    result
+}
+
+/// Slot offsets that hold a single global each; everything else that is copied in from a
+/// constant address belongs to the vision row array.
+const SYNC_SLOT_STATE_BYTE: u64 = 3;
+const SYNC_SLOT_MINIMAP_UNIT_VISION: u64 = 4;
+const SYNC_SLOT_MINIMAP_MARKER_COUNT: u64 = 5;
+const SYNC_SLOT_CHECK_HASH: u64 = 8;
+
+struct TurnSyncAnalyzer<'a, 'e, E: ExecutionState<'e>> {
+    result: &'a mut TurnSyncChecks<'e, E::VirtualAddress>,
+    sync_data_addr: u64,
+    /// Byte size of one ring slot, learned from the index multiplier of the first indexed
+    /// slot access. Zero until then.
+    slot_size: u64,
+    /// (slot offset, source address) of the lowest-offset store that copies the vision rows
+    /// in; the source of that one is the array's base.
+    vision_copy: Option<(u64, u64)>,
+    /// Single non-code address loaded as a constant by the slot fill, or u64::MAX if there
+    /// was more than one.
+    data_constant: Option<u64>,
+    inline_depth: u8,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for TurnSyncAnalyzer<'a, 'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        let ctx = ctrl.ctx();
+        match *op {
+            Operation::Move(ref dest, value) => {
+                if let DestOperand::Memory(ref mem) = *dest {
+                    let mem = ctrl.resolve_mem(mem);
+                    if let Some(offset) = self.slot_offset(ctx, &mem) {
+                        let value = ctrl.resolve(value);
+                        self.slot_store(ctx, offset, value);
+                        return;
+                    }
+                }
+                if value.if_arithmetic_mul().is_some() {
+                    let value = ctrl.resolve(value);
+                    self.check_map_row(ctx, value);
+                } else if value.if_memory().is_some_and(|x| x.size == MemAccessSize::Mem8) {
+                    let value = ctrl.resolve(value);
+                    self.check_check_kinds(ctx, value);
+                } else if self.inline_depth != 0 && value.if_constant().is_some() {
+                    let value = ctrl.resolve(value);
+                    self.check_data_constant(ctrl, value);
+                }
+            }
+            Operation::Call(dest) => {
+                // memcpy(slot + vision_offset, current_sync_vision_bytes, row_count)
+                let arg1 = ctrl.resolve_arg(0);
+                let arg1_mem = ctx.mem_access(arg1, 0, MemAccessSize::Mem8);
+                if let Some(offset) = self.slot_offset(ctx, &arg1_mem) {
+                    let len = ctrl.resolve_arg(2).if_constant().unwrap_or(0);
+                    let source = ctrl.resolve_arg(1).if_constant().unwrap_or(0);
+                    if source != 0 && len != 0 && offset.wrapping_add(len) <= self.slot_size {
+                        self.add_vision_copy(offset, source);
+                        return;
+                    }
+                }
+                // The slot fill is a tail call on some builds, which gets followed as a
+                // branch of this same function, and a regular call on others.
+                if self.inline_depth == 0 && self.slot_size != 0 {
+                    if let Some(dest) = ctrl.resolve_va(dest) {
+                        let had_state = self.has_sync_state();
+                        let outer_constant = self.data_constant;
+                        self.data_constant = None;
+                        self.inline_depth = 1;
+                        ctrl.analyze_with_current_state(self, dest);
+                        self.inline_depth = 0;
+                        let constant = self.data_constant;
+                        self.data_constant = outer_constant;
+                        // Builds that copy the row array with a string move leave nothing to
+                        // match the source address against; the array is then the one data
+                        // address that the slot fill loads by itself.
+                        if !had_state && self.has_sync_state() && self.vision_copy.is_none() {
+                            if let Some(constant) = constant.filter(|&x| x != u64::MAX) {
+                                self.vision_copy = Some((u64::MAX, constant));
+                            }
+                        }
+                    }
+                }
+            }
+            Operation::Jump { condition, .. } => {
+                let condition = ctrl.resolve(condition);
+                self.check_cursor_wrap(ctx, condition);
+            }
+            Operation::ConditionalMove(_, _, condition) => {
+                let condition = ctrl.resolve(condition);
+                self.check_cursor_wrap(ctx, condition);
+            }
+            _ => (),
+        }
+    }
+}
+
+impl<'a, 'e, E: ExecutionState<'e>> TurnSyncAnalyzer<'a, 'e, E> {
+    /// Byte offset inside a ring slot for memory that is `sync_data + index * slot_size`
+    /// based. Learns the slot size from the index multiplier; a slot has to be larger than
+    /// the row array it contains, which alone rules out unrelated multiplications.
+    fn slot_offset(&mut self, ctx: OperandCtx<'e>, mem: &MemAccess<'e>) -> Option<u64> {
+        let (base, offset) = mem.address();
+        if let Some((index, mul)) = base.if_arithmetic_mul() {
+            let size = mul.if_constant()?;
+            if size < 0x40 {
+                return None;
+            }
+            if self.slot_size == 0 {
+                self.slot_size = size;
+            } else if self.slot_size != size {
+                return None;
+            }
+            self.check_slot_index(ctx, index);
+        } else if self.slot_size == 0 || base.if_constant() != Some(0) {
+            // Slot 0's address has no multiply left in it, but only accept that once the
+            // slot size has been learned from a properly indexed access.
+            return None;
+        }
+        Some(offset.wrapping_sub(self.sync_data_addr)).filter(|&x| x < self.slot_size)
+    }
+
+    fn slot_store(&mut self, ctx: OperandCtx<'e>, offset: u64, value: Operand<'e>) {
+        let result = &mut self.result;
+        let global = value.unwrap_and_mask().if_memory()
+            .filter(|mem| mem.is_global() && mem.if_constant_address().is_some());
+        let global = match global {
+            Some(s) => s,
+            None => return,
+        };
+        let size = global.size;
+        let op = ctx.memory(global);
+        match offset {
+            SYNC_SLOT_STATE_BYTE if size == MemAccessSize::Mem8 => {
+                result.current_sync_state_byte = Some(op);
+            }
+            SYNC_SLOT_MINIMAP_UNIT_VISION if size == MemAccessSize::Mem8 => {
+                result.captured_minimap_unit_vision_sync_value = Some(op);
+            }
+            SYNC_SLOT_MINIMAP_MARKER_COUNT if size == MemAccessSize::Mem8 => {
+                result.captured_minimap_marker_count_sync_value = Some(op);
+            }
+            SYNC_SLOT_CHECK_HASH if size == MemAccessSize::Mem32 => {
+                result.current_sync_check_hash = Some(op);
+            }
+            _ => {
+                if offset > SYNC_SLOT_CHECK_HASH {
+                    if let Some(address) = global.if_constant_address() {
+                        self.add_vision_copy(offset, address);
+                    }
+                }
+            }
+        }
+    }
+
+    fn add_vision_copy(&mut self, offset: u64, address: u64) {
+        let better = match self.vision_copy {
+            Some((prev, _)) => offset < prev,
+            None => true,
+        };
+        if better {
+            self.vision_copy = Some((offset, address));
+        }
+    }
+
+    fn has_sync_state(&self) -> bool {
+        self.result.current_sync_state_byte.is_some() ||
+            self.result.current_sync_check_hash.is_some()
+    }
+
+    /// Notes the single non-code address the slot fill loads as a plain constant, or that
+    /// there was more than one. u64::MAX means "more than one".
+    fn check_data_constant(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, value: Operand<'e>) {
+        let constant = match value.if_constant() {
+            Some(s) if s > 0x1000 => s,
+            _ => return,
+        };
+        let address = E::VirtualAddress::from_u64(constant);
+        let is_code = ctrl.binary().section_by_addr(address)
+            .is_some_and(|section| &section.name[..5] == b".text");
+        if is_code {
+            return;
+        }
+        self.data_constant = match self.data_constant {
+            None => Some(constant),
+            Some(prev) if prev == constant => Some(prev),
+            Some(_) => Some(u64::MAX),
+        };
+    }
+
+    /// The ring cursor is the byte global that the slot address is indexed by. Builds which
+    /// wrap it with a conditional move lose it here, and get it from the wrap comparison
+    /// instead.
+    fn check_slot_index(&mut self, ctx: OperandCtx<'e>, index: Operand<'e>) {
+        if self.result.sync_slot_index.is_some() {
+            return;
+        }
+        let mut found = None;
+        for part in index.iter() {
+            if let Some(mem) = part.if_memory() {
+                if mem.size != MemAccessSize::Mem8 || !mem.is_global() {
+                    return;
+                }
+                let op = ctx.memory(mem);
+                if found.is_some_and(|x| x != op) {
+                    return;
+                }
+                found = Some(op);
+            }
+        }
+        self.result.sync_slot_index = found;
+    }
+
+    /// The check kind of the turn is `sync_check_kinds[sync_check_kind_index]`. The kind is
+    /// matched where it is read rather than where it is stored into the slot, since the
+    /// register holding it does not survive the state hashing calls in between.
+    fn check_check_kinds(&mut self, ctx: OperandCtx<'e>, value: Operand<'e>) {
+        let kind_index = match self.result.sync_check_kind_index {
+            Some(s) => s,
+            None => return,
+        };
+        if self.result.sync_check_kinds.is_some() {
+            return;
+        }
+        if let Some(mem) = value.if_memory() {
+            let (index, array) = mem.address();
+            if array > 0x1000 && index.iter().any(|x| x == kind_index) {
+                self.result.sync_check_kinds = Some(ctx.constant(array));
+            }
+        }
+    }
+
+    /// The turn's map row is `sync_map_row_index * map_width_tiles` tiles into map_tile_flags.
+    fn check_map_row(&mut self, ctx: OperandCtx<'e>, value: Operand<'e>) {
+        let (l, r) = match value.unwrap_and_mask().if_arithmetic_mul() {
+            Some(s) => s,
+            None => return,
+        };
+        for &(width, row) in &[(l, r), (r, l)] {
+            if width.unwrap_and_mask().if_mem16_offset(0xe4).is_none() {
+                continue;
+            }
+            let row = row.unwrap_sext().unwrap_and_mask();
+            if let Some(mem) = row.if_memory() {
+                if mem.size == MemAccessSize::Mem32 && mem.if_constant_address().is_some() {
+                    self.result.sync_map_row_index = Some(ctx.memory(mem));
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Both cursors are stepped as `index + 1` and wrapped back to zero when the sum reaches
+    /// their bound; the bound is a constant for the ring slots and a global for the kinds.
+    fn check_cursor_wrap(&mut self, ctx: OperandCtx<'e>, condition: Operand<'e>) {
+        let condition = condition.if_arithmetic_eq_neq_zero(ctx)
+            .map(|x| x.0)
+            .unwrap_or(condition);
+        let (l, r) = match condition.if_arithmetic(ArithOpType::GreaterThan) {
+            Some(s) => s,
+            None => return,
+        };
+        for &(bound, index) in &[(l, r), (r, l)] {
+            let index = match index.unwrap_and_mask().if_arithmetic_add_const(1) {
+                Some(s) => s,
+                None => continue,
+            };
+            let index = match index.unwrap_and_mask().if_memory() {
+                Some(s) if s.size == MemAccessSize::Mem8 && s.is_global() => s,
+                _ => continue,
+            };
+            let index = ctx.memory(index);
+            if let Some(c) = bound.if_constant() {
+                // Ring slot counts are small; the wrap can be written either against the
+                // count or against the last valid index.
+                if c >= 2 && c <= 0x100 {
+                    self.result.sync_slot_index = Some(index);
+                }
+            } else if let Some(count) = bound.unwrap_and_mask().if_memory() {
+                if count.size == MemAccessSize::Mem8 && count.is_global() {
+                    self.result.sync_check_kind_index = Some(index);
+                    self.result.sync_check_kind_count = Some(ctx.memory(count));
+                }
+            }
+            return;
+        }
     }
 }

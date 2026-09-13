@@ -592,6 +592,8 @@ results! {
         CancelUnit => cancel_unit => cache_cancel_unit_finding,
         RandSynced => rand_synced => cache_rng,
         AdvanceTurnTimerAndStepNetwork => advance_turn_timer_and_step_network => cache_turn_timer,
+        // Writes one slot of the sync_data ring; called once per turn by step_network.
+        RecordTurnSyncSlot => record_turn_sync_slot => cache_turn_sync_checks,
     }
 }
 
@@ -678,6 +680,13 @@ results! {
         ActiveIscriptUnit => active_iscript_unit => cache_bullet_creation,
         UniqueCommandUser => unique_command_user => cache_selections,
         Selections => selections => cache_selections,
+        // Unit *[selection_limit] of what the local player has selected on screen; laid out
+        // as one more row right after `selections`.
+        LocalSelection => local_selection => cache_local_selection,
+        // u16[player_count][hotkey_group_count]; frame each selection history group was last
+        // written on.
+        SelectionHotkeyLastUsedFrames => selection_hotkey_last_used_frames =>
+            cache_selection_hotkey_last_used_frames,
         GlobalEventHandlers => global_event_handlers => cache_ui_event_handlers,
         ReplayVisions => replay_visions => cache_replay_visions,
         ReplayShowEntireMap => replay_show_entire_map => cache_replay_visions,
@@ -906,6 +915,48 @@ results! {
         CursorScaleFactor => cursor_scale_factor,
         MinimapColorMode => minimap_color_mode => cache_minimap_event_handler,
         GameFrameCount => game_frame_count => cache_game_frame_count,
+        // Statically allocated AI object pools. Each is an array of fixed size entries
+        // followed by the head of the free list linking the unused ones.
+        WorkerAiPoolStorage => worker_ai_pool_storage => cache_ai_pool_globals,
+        WorkerAiFreeList => worker_ai_free_list => cache_ai_pool_globals,
+        BuildingAiPoolStorage => building_ai_pool_storage => cache_ai_pool_globals,
+        BuildingAiFreeList => building_ai_free_list => cache_ai_pool_globals,
+        AiTownPoolStorage => ai_town_pool_storage => cache_ai_pool_globals,
+        AiTownFreeList => ai_town_free_list => cache_ai_pool_globals,
+        AiScriptPoolStorage => ai_script_pool_storage => cache_ai_pool_globals,
+        AiScriptFreeList => ai_script_free_list => cache_ai_pool_globals,
+        MilitaryAiPoolStorage => military_ai_pool_storage => cache_ai_pool_globals,
+        MilitaryAiFreeList => military_ai_free_list => cache_ai_pool_globals,
+        GuardAiPoolStorage => guard_ai_pool_storage => cache_ai_pool_globals,
+        GuardAiFreeList => guard_ai_free_list => cache_ai_pool_globals,
+        // i32 round robin cursor of whose AI gets to spend money next.
+        AiSpendingPlayerIndex => ai_spending_player_index => cache_ai_pool_globals,
+        // Disappearing creep state entries, laid out right before dcreep_lookup.
+        DcreepStatePool => dcreep_state_pool => cache_ai_pool_globals,
+        // Per-turn sync check ring bookkeeping, all next to sync_data.
+        // u8 cursor of the slot in sync_data that gets written this turn.
+        SyncSlotIndex => sync_slot_index => cache_turn_sync_checks,
+        // u8 cursor into sync_check_kinds, wrapping at sync_check_kind_count.
+        SyncCheckKindIndex => sync_check_kind_index => cache_turn_sync_checks,
+        SyncCheckKindCount => sync_check_kind_count => cache_turn_sync_checks,
+        // u8 array of the check kinds that the turns rotate through.
+        SyncCheckKinds => sync_check_kinds => cache_turn_sync_checks,
+        // i32 map_tile_flags row hashed this turn, stepped by one per turn and wrapped
+        // at the map height.
+        SyncMapRowIndex => sync_map_row_index => cache_turn_sync_checks,
+        // u8 snapshots of the minimap sync accumulators, taken once per turn and copied
+        // into the slot recorded on the next turn.
+        CapturedMinimapUnitVisionSyncValue => captured_minimap_unit_vision_sync_value =>
+            cache_turn_sync_checks,
+        CapturedMinimapMarkerCountSyncValue => captured_minimap_marker_count_sync_value =>
+            cache_turn_sync_checks,
+        // u8 fold of the sprite vision rows that current_sync_check_hash names.
+        CurrentSyncStateByte => current_sync_state_byte => cache_turn_sync_checks,
+        // u32 copied to the slot next to current_sync_state_byte. It holds the first
+        // sprite hline row of the window that byte was folded from, not a hash.
+        CurrentSyncCheckHash => current_sync_check_hash => cache_turn_sync_checks,
+        // u8 array, one visibility mask per sprite hline row.
+        CurrentSyncVisionBytes => current_sync_vision_bytes => cache_turn_sync_checks,
     }
 }
 
@@ -947,6 +998,8 @@ pub struct AnalysisCache<'e, E: ExecutionState<'e>> {
     create_game_dialog_vtbl_on_multiplayer_create: u16,
     join_param_variant_type_offset: u16,
     limits: Cached<Rc<Limits<'e, E::VirtualAddress>>>,
+    ai_pools: Cached<Rc<ai::AiPools<'e>>>,
+    state_block_sizes: Cached<game::StateBlockSizes>,
     prism_shaders: Cached<PrismShaders<E::VirtualAddress>>,
     dat_patches: Cached<Option<Rc<DatPatches<'e, E::VirtualAddress>>>>,
     run_triggers: Cached<RunTriggers<E::VirtualAddress>>,
@@ -1172,6 +1225,8 @@ impl<'e, E: ExecutionState<'e>> Analysis<'e, E> {
                 create_game_dialog_vtbl_on_multiplayer_create: 0,
                 join_param_variant_type_offset: u16::MAX,
                 limits: Default::default(),
+                ai_pools: Default::default(),
+                state_block_sizes: Default::default(),
                 prism_shaders: Default::default(),
                 dat_patches: Default::default(),
                 run_triggers: Default::default(),
@@ -1460,6 +1515,14 @@ impl<'e, E: ExecutionState<'e>> Analysis<'e, E> {
 
     pub fn limits(&mut self) -> Rc<Limits<'e, E::VirtualAddress>> {
         self.enter(AnalysisCache::limits)
+    }
+
+    pub fn ai_pools(&mut self) -> Rc<ai::AiPools<'e>> {
+        self.enter(AnalysisCache::ai_pools)
+    }
+
+    pub fn state_block_sizes(&mut self) -> game::StateBlockSizes {
+        self.enter(AnalysisCache::state_block_sizes)
     }
 
     /// Memory allocation function that at least TTF code uses.
@@ -2239,6 +2302,21 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
 
     fn selections(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<Operand<'e>> {
         self.cache_many_op(OperandAnalysis::Selections, |s| s.cache_selections(actx))
+    }
+
+    fn cache_local_selection(&mut self, actx: &AnalysisCtx<'e, E>) {
+        self.cache_single_operand(OperandAnalysis::LocalSelection, |s| {
+            let selections = s.selections(actx)?;
+            commands::local_selection(actx, selections, &s.function_finder())
+        });
+    }
+
+    fn cache_selection_hotkey_last_used_frames(&mut self, actx: &AnalysisCtx<'e, E>) {
+        self.cache_single_operand(OperandAnalysis::SelectionHotkeyLastUsedFrames, |s| {
+            let switch = s.process_commands_switch(actx)?;
+            let game_frame_count = s.game_frame_count(actx)?;
+            commands::selection_hotkey_last_used_frames(actx, &switch, game_frame_count)
+        });
     }
 
     fn is_replay(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<Operand<'e>> {
@@ -3234,6 +3312,118 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
         )
     }
 
+    fn first_ai_script(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<Operand<'e>> {
+        self.cache_many_op(OperandAnalysis::FirstAiScript, |s| s.cache_ai_step_frame(actx))
+    }
+
+    fn step_ai_regions_region(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<Operand<'e>> {
+        self.cache_many_op(OperandAnalysis::StepAiRegionsRegion, |s| s.cache_ai_step_frame(actx))
+    }
+
+    fn dcreep_lookup(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<Operand<'e>> {
+        self.cache_many_op(OperandAnalysis::DcreepLookup, |s| s.cache_step_objects(actx))
+    }
+
+    fn ai_pools(&mut self, actx: &AnalysisCtx<'e, E>) -> Rc<ai::AiPools<'e>> {
+        if let Some(cached) = self.ai_pools.cached() {
+            return cached;
+        }
+        let result = Some(()).and_then(|()| {
+            let player_ai_towns = self.player_ai_towns(actx)?;
+            let first_guard_ai = self.first_guard_ai(actx)?;
+            let first_ai_script = self.first_ai_script(actx)?;
+            let step_ai_regions_region = self.step_ai_regions_region(actx)?;
+            let ai_spend_money = self.ai_spend_money(actx);
+            let mut result = ai::ai_pools(
+                actx,
+                player_ai_towns,
+                first_guard_ai,
+                first_ai_script,
+                step_ai_regions_region,
+                ai_spend_money,
+                &self.function_finder(),
+            );
+            if let Some(dcreep_lookup) = self.dcreep_lookup(actx) {
+                result.dcreep = ai::dcreep_state_pool(actx, dcreep_lookup, &self.function_finder());
+            }
+            Some(result)
+        }).unwrap_or_default();
+        let result = Rc::new(result);
+        self.ai_pools.cache(&result);
+        result
+    }
+
+    fn path_array(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<Operand<'e>> {
+        self.cache_many_op(OperandAnalysis::PathArray, |s| s.cache_hide_unit(actx))
+    }
+
+    fn first_free_path(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<Operand<'e>> {
+        self.cache_many_op(OperandAnalysis::FirstFreePath, |s| s.cache_hide_unit(actx))
+    }
+
+    fn resource_areas(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<Operand<'e>> {
+        self.cache_many_op(OperandAnalysis::ResourceAreas, |s| s.cache_ai_step_frame(actx))
+    }
+
+    fn state_block_sizes(&mut self, actx: &AnalysisCtx<'e, E>) -> game::StateBlockSizes {
+        if let Some(cached) = self.state_block_sizes.cached() {
+            return cached;
+        }
+        let mut result = game::StateBlockSizes::default();
+        if let (Some(pathing), Some(path_array), Some(first_free_path)) =
+            (self.pathing(actx), self.path_array(actx), self.first_free_path(actx))
+        {
+            let extents = game::pathing_extents(
+                actx,
+                pathing,
+                path_array,
+                first_free_path,
+                &self.function_finder(),
+            );
+            result.pathing_state = extents.pathing_state_size;
+            result.path_array = extents.path_array_size;
+            result.path_entry = extents.path_entry_size;
+        }
+        let blocks = [
+            self.player_ai(actx),
+            self.trigger_completed_units_cache(actx),
+            self.resource_areas(actx),
+        ];
+        let mut sizes = [0u32; 3];
+        for (out, global) in sizes.iter_mut().zip(blocks) {
+            if let Some(global) = global {
+                let functions = self.function_finder();
+                *out = game::global_block_size(actx, global, &functions).unwrap_or(0);
+            }
+        }
+        result.player_ai = sizes[0];
+        result.trigger_completed_units_cache = sizes[1];
+        result.resource_areas = sizes[2];
+        self.state_block_sizes.cache(&result);
+        result
+    }
+
+    fn cache_ai_pool_globals(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use OperandAnalysis::*;
+        self.cache_many(
+            &[],
+            &[WorkerAiPoolStorage, WorkerAiFreeList, BuildingAiPoolStorage, BuildingAiFreeList,
+            AiTownPoolStorage, AiTownFreeList, AiScriptPoolStorage, AiScriptFreeList,
+            MilitaryAiPoolStorage, MilitaryAiFreeList, GuardAiPoolStorage, GuardAiFreeList,
+            AiSpendingPlayerIndex, DcreepStatePool],
+            |s|
+        {
+            let pools = s.ai_pools(actx);
+            Some(([], [pools.worker.storage, pools.worker.free_list,
+                pools.building.storage, pools.building.free_list,
+                pools.town.storage, pools.town.free_list,
+                pools.script.storage, pools.script.free_list,
+                pools.military.storage, pools.military.free_list,
+                pools.guard.storage, pools.guard.free_list,
+                pools.ai_spending_player_index, pools.dcreep.storage]))
+        })
+    }
+
     fn cache_ai_step_frame(&mut self, actx: &AnalysisCtx<'e, E>) {
         use AddressAnalysis::*;
         use OperandAnalysis::*;
@@ -4114,6 +4304,32 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
 
     fn step_network(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<E::VirtualAddress> {
         self.cache_many_addr(AddressAnalysis::StepNetwork, |s| s.cache_game_loop(actx))
+    }
+
+    fn sync_data(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<Operand<'e>> {
+        self.cache_many_op(OperandAnalysis::SyncData, |s| s.cache_game_loop(actx))
+    }
+
+    fn cache_turn_sync_checks(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        use OperandAnalysis::*;
+        self.cache_many(
+            &[RecordTurnSyncSlot],
+            &[SyncSlotIndex, SyncCheckKindIndex, SyncCheckKindCount, SyncCheckKinds,
+            SyncMapRowIndex, CapturedMinimapUnitVisionSyncValue,
+            CapturedMinimapMarkerCountSyncValue, CurrentSyncStateByte, CurrentSyncCheckHash,
+            CurrentSyncVisionBytes],
+            |s|
+        {
+            let sync_data = s.sync_data(actx)?;
+            let result = network::turn_sync_checks(actx, sync_data, &s.function_finder());
+            Some(([result.record_turn_sync_slot],
+                [result.sync_slot_index, result.sync_check_kind_index,
+                result.sync_check_kind_count, result.sync_check_kinds,
+                result.sync_map_row_index, result.captured_minimap_unit_vision_sync_value,
+                result.captured_minimap_marker_count_sync_value, result.current_sync_state_byte,
+                result.current_sync_check_hash, result.current_sync_vision_bytes]))
+        })
     }
 
     fn process_events(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<E::VirtualAddress> {
@@ -5344,6 +5560,10 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
                 Some(([result.cancel_unit], []))
             })
     }
+    fn game_frame_count(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<Operand<'e>> {
+        self.cache_many_op(OperandAnalysis::GameFrameCount, |s| s.cache_game_frame_count(actx))
+    }
+
     fn cache_game_frame_count(&mut self, actx: &AnalysisCtx<'e, E>) {
         use OperandAnalysis::*;
         self.cache_many(&[], &[GameFrameCount],

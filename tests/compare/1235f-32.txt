@@ -207,6 +207,7 @@ rand_synced: 0072d3b0
 read_whole_mpq_file: 00910e00
 read_whole_mpq_file2: 00910d10
 receive_storm_turns: 00718480
+record_turn_sync_slot: 00733130
 refresh_ui: 00780920
 remove_from_client_selection: 0059e380
 remove_from_selections: 00763d90
@@ -330,16 +331,25 @@ active_iscript_flingy: Mem32[f663cc]
 active_iscript_unit: Mem32[f663c8]
 ai_military_update_counter: Mem32[f99098]
 ai_regions: fa2eec
+ai_script_free_list: Mem32[f9a510]
+ai_script_pool_storage: f990c0
+ai_spending_player_index: Mem32[f7d2d8]
 ai_target_ignore_request_reset: Mem32[f990a4]
 ai_target_ignore_reset_counter: Mem32[f9909c]
 ai_target_ignore_reset_counter2: Mem32[f990a0]
+ai_town_free_list: Mem32[f99048]
+ai_town_pool_storage: f8dc98
 ai_transport_reachability_cached_region: fa7d58
 allocated_order_count: Mem32[f73190]
 anti_troll: fb5b30
 asset_scale: Mem32[eccd20]
 base_anim_set: f71198
 bnet_controller: (Mem32[efb308] ^ 1e2b16b0)
+building_ai_free_list: Mem32[f8dc90]
+building_ai_pool_storage: f830b0
 campaigns: efadd0
+captured_minimap_marker_count_sync_value: Mem8[117346a]
+captured_minimap_unit_vision_sync_value: Mem8[1173469]
 cheat_flags: Mem32[1135f74]
 chk_init_players: 1172c00
 client_selection: 11823d8
@@ -351,6 +361,9 @@ creep_funcs: 11a4c20
 creep_original_tiles: Mem32[11a4c10]
 creep_tile_borders: Mem32[11a4c14]
 current_campaign_mission: Mem32[1188b00]
+current_sync_check_hash: Mem32[f73cbc]
+current_sync_state_byte: Mem8[f734b5]
+current_sync_vision_bytes: f73cc0
 current_tooltip_ctrl: Mem32[f74290]
 cursor_marker: Mem32[f73e24]
 cursor_scale_factor: Mem32[1136190]
@@ -359,6 +372,7 @@ dcreep_list_begin: 1188a28
 dcreep_list_size: 1188a50
 dcreep_lookup: 1187a28
 dcreep_next_update: Mem32[1188a64]
+dcreep_state_pool: 1182a28
 dcreep_unit_next_update: Mem32[1188a68]
 dialog_return_code: Mem32[11a37fc]
 disable_color_choice: f73e5c
@@ -417,6 +431,8 @@ global_event_handlers: 1147020
 graphic_layers: 11a0f80
 grpwire_ddsgrp: 11819a4
 grpwire_grp: Mem32[118199c]
+guard_ai_free_list: Mem32[fafa88]
+guard_ai_pool_storage: fa7d88
 hp_bar_images: f677a0
 hp_bar_state: f67aa8
 image_grps: f66800
@@ -457,6 +473,7 @@ lobby_state: Mem8[116f98d]
 local_game_result: Mem32[1149f38]
 local_player_id: Mem32[ef4d38]
 local_player_name: 116fb30
+local_selection: 1180018
 local_storm_player_id: Mem32[ef4d40]
 local_unique_player_id: Mem32[ef4d3c]
 local_visions: Mem32[116faf4]
@@ -470,6 +487,8 @@ map_mpq: Mem32[114cb70]
 map_tile_flags: Mem32[f799cc]
 map_width_pixels: Mem16[fb5da0]
 menu_screen_id: (((500e1f14 - Mem32[f505e4]) ^ Mem32[114a0b4]) & ffffffff)
+military_ai_free_list: Mem32[fa2ee8]
+military_ai_pool_storage: f9e0c8
 minimap_color_mode: Mem8[114f1a0]
 minimap_cursor_type: Mem16[114770c]
 minitile_data: Mem32[f799c4]
@@ -527,6 +546,7 @@ secondary_order_timer_reset_counter: Mem32[f73f74]
 select_start_x: Mem16[1188b10]
 select_start_y: Mem16[1188b12]
 selection_circles: f67b50
+selection_hotkey_last_used_frames: 114a4c8
 selections: 117fe98
 sfx_data: Mem32[f9a52c]
 shield_overlays: f700f8
@@ -550,7 +570,12 @@ step_ai_regions_region: Mem32[fa2f10]
 step_game_frames: Mem32[eeeda0]
 storm_command_user: Mem32[ef4d34]
 sync_active: Mem32[1171628]
+sync_check_kind_count: Mem8[117346d]
+sync_check_kind_index: Mem8[117346c]
+sync_check_kinds: 1174530
 sync_data: 1173470
+sync_map_row_index: Mem32[1174550]
+sync_slot_index: Mem8[117346b]
 targeted_order_fow: Mem8[1182935]
 targeted_order_ground: Mem8[1182934]
 targeted_order_unit: Mem8[1182933]
@@ -581,6 +606,8 @@ vision_update_counter: Mem32[1147750]
 vision_updated: Mem8[1147758]
 vx4_map_tiles: Mem32[fb5db0]
 wirefram_ddsgrp: 11824cc
+worker_ai_free_list: Mem32[f830a8]
+worker_ai_pool_storage: f7d2e8
 zoom: Mem32[eceba8]
 zoom_action_active: Mem8[ecebb4]
 zoom_action_completion: Mem32[ecebb8]
@@ -647,6 +674,18 @@ limits.units: [(f65308, 0, 0), (f73e2c, 0, 2), (f73e38, 0, 2), (f73f2c, 1, 0), (
 limits.bullets: [(f65314, 0, 0)]
 limits.orders: [(f73184, 0, 0)]
 limits.fow_sprites: [(f73df4, 0, 0)]
+worker_ai_pool_extents: 0x3e8 entries of 0x18
+building_ai_pool_extents: 0x3e8 entries of 0x2c
+ai_town_pool_extents: 0x64 entries of 0x1cc
+ai_script_pool_extents: 0x64 entries of 0x34
+military_ai_pool_extents: 0x3e8 entries of 0x14
+guard_ai_pool_extents: 0x3e8 entries of 0x20
+dcreep_state_pool_extents: 0x400 entries of 0x14
+pathing_state_size: 0x97a20
+path_array_extents: 0x20000 bytes, entries of 0x80
+player_ai_size: 0x2740
+trigger_completed_units_cache_size: 0x2ac0
+resource_areas_size: 0x2ee8
 CreateGameScreen.on_multiplayer_create offset: Some(b0)
 Prism vertex shader sets: 0x6
 Prism pixel shader sets: 0x2b

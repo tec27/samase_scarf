@@ -3197,3 +3197,435 @@ impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for PlaceBuildingAnal
         }
     }
 }
+
+/// A pool of fixed size AI objects: an array of entries, and the head of the free list that
+/// links the unused ones together.
+#[derive(Copy, Clone, Default)]
+pub struct AiPool<'e> {
+    /// Constant address of the entry array.
+    pub storage: Option<Operand<'e>>,
+    /// Pointer sized global holding the first free entry.
+    pub free_list: Option<Operand<'e>>,
+    pub entry_size: u32,
+    pub entry_count: u32,
+}
+
+#[derive(Clone, Default)]
+pub struct AiPools<'e> {
+    pub worker: AiPool<'e>,
+    pub building: AiPool<'e>,
+    pub town: AiPool<'e>,
+    pub script: AiPool<'e>,
+    pub military: AiPool<'e>,
+    pub guard: AiPool<'e>,
+    /// Disappearing creep state entries; not an AI pool, but built the same way.
+    pub dcreep: AiPool<'e>,
+    /// i32 round robin cursor of whose AI gets to spend money next.
+    pub ai_spending_player_index: Option<Operand<'e>>,
+}
+
+const MAX_CONST_STORES: usize = 192;
+const MAX_POOLS: usize = 4;
+
+#[derive(Copy, Clone)]
+struct PoolInfo {
+    base: u64,
+    entry_size: u32,
+    entry_count: u32,
+    free_list: Option<u64>,
+}
+
+/// Constant address / constant value stores collected from a pool initializer.
+struct ConstStores {
+    stores: [(u64, u64); MAX_CONST_STORES],
+    len: usize,
+}
+
+impl ConstStores {
+    fn iter(&self) -> impl Iterator<Item = &(u64, u64)> {
+        self.stores[..self.len].iter()
+    }
+}
+
+/// Finds the statically allocated AI object pools.
+///
+/// Initializing a pool links every entry into a free list, which leaves two recognizable
+/// kinds of store behind: `entry[n].next = &entry[n + 1]`, whose address and value are both
+/// constants exactly one entry apart, and `free_list = &entry[0]` once the list is built.
+/// Together those give the base, entry size, entry count and free list head of a pool without
+/// knowing any of them beforehand.
+///
+/// Which pool is which follows from where its initializer was reached: the guard, script and
+/// military pools are the only pool built by theirs, while the town initializer builds three,
+/// of which the town pool is the one whose address the per-player town lists are pointed at
+/// and the other two are the worker and building arrays that a town entry points at, in that
+/// order.
+pub(crate) fn ai_pools<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    player_ai_towns: Operand<'e>,
+    first_guard_ai: Operand<'e>,
+    first_ai_script: Operand<'e>,
+    step_ai_regions_region: Operand<'e>,
+    ai_spend_money: Option<E::VirtualAddress>,
+    functions: &FunctionFinder<'_, 'e, E>,
+) -> AiPools<'e> {
+    let mut result = AiPools::default();
+    let ctx = actx.ctx;
+    if let Some(stores) = pool_init_stores(actx, first_guard_ai, None, functions) {
+        if let Some(pool) = only_pool(&stores) {
+            result.guard = to_ai_pool::<E>(ctx, pool);
+        }
+    }
+    if let Some(stores) = pool_init_stores(actx, first_ai_script, None, functions) {
+        if let Some(pool) = only_pool(&stores) {
+            result.script = to_ai_pool::<E>(ctx, pool);
+        }
+    }
+    if let Some(stores) = pool_init_stores(actx, step_ai_regions_region, None, functions) {
+        if let Some(pool) = only_pool(&stores) {
+            result.military = to_ai_pool::<E>(ctx, pool);
+        }
+    }
+    if let Some(stores) = pool_init_stores(actx, player_ai_towns, None, functions) {
+        let towns = global_address(player_ai_towns).unwrap_or(0);
+        let pools = collect_pools(&stores);
+        let town = pools.iter()
+            .flatten()
+            .find(|pool| {
+                stores.iter().any(|&(address, value)| {
+                    value == pool.base && address >= towns &&
+                        address < towns.wrapping_add(0x100)
+                })
+            })
+            .copied();
+        if let Some(town) = town {
+            result.town = to_ai_pool::<E>(ctx, town);
+            // Each town entry points at the worker array and then the building array.
+            let entry_end = town.base.wrapping_add(town.entry_size as u64);
+            let mut sides: [Option<(u64, PoolInfo)>; MAX_POOLS] = [None; MAX_POOLS];
+            let mut count = 0;
+            for pool in pools.iter().flatten().filter(|x| x.base != town.base) {
+                let offset = stores.iter()
+                    .find(|&&(address, value)| {
+                        value == pool.base && address >= town.base && address < entry_end
+                    })
+                    .map(|&(address, _)| address.wrapping_sub(town.base));
+                if let Some(offset) = offset {
+                    sides[count] = Some((offset, *pool));
+                    count += 1;
+                }
+            }
+            sides[..count].sort_unstable_by_key(|x| x.map(|x| x.0));
+            if let Some((_, pool)) = sides[0] {
+                result.worker = to_ai_pool::<E>(ctx, pool);
+            }
+            if let Some((_, pool)) = sides[1] {
+                result.building = to_ai_pool::<E>(ctx, pool);
+            }
+        }
+    }
+    if let Some(ai_spend_money) = ai_spend_money {
+        result.ai_spending_player_index = ai_spending_player_index(actx, ai_spend_money);
+    }
+    result
+}
+
+/// Finds the disappearing creep state pool, whose entries are linked into a free list the
+/// same way the AI pools are and which ends where `dcreep_lookup` starts.
+pub(crate) fn dcreep_state_pool<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    dcreep_lookup: Operand<'e>,
+    functions: &FunctionFinder<'_, 'e, E>,
+) -> AiPool<'e> {
+    let end = match global_address(dcreep_lookup) {
+        Some(s) => s,
+        None => return AiPool::default(),
+    };
+    let stores = match pool_init_stores(actx, dcreep_lookup, Some(end), functions) {
+        Some(s) => s,
+        None => return AiPool::default(),
+    };
+    match push_loop_pool(&stores, end) {
+        Some(pool) => to_ai_pool::<E>(actx.ctx, pool),
+        None => AiPool::default(),
+    }
+}
+
+fn global_address<'e>(op: Operand<'e>) -> Option<u64> {
+    op.if_constant()
+        .or_else(|| op.if_memory()?.if_constant_address())
+}
+
+fn to_ai_pool<'e, E: ExecutionState<'e>>(ctx: OperandCtx<'e>, pool: PoolInfo) -> AiPool<'e> {
+    AiPool {
+        storage: Some(ctx.constant(pool.base)),
+        free_list: pool.free_list.map(|address| {
+            ctx.memory(&ctx.mem_access(ctx.const_0(), address, E::WORD_SIZE))
+        }),
+        entry_size: pool.entry_size,
+        entry_count: pool.entry_count,
+    }
+}
+
+fn only_pool(stores: &ConstStores) -> Option<PoolInfo> {
+    let pools = collect_pools(stores);
+    match pools {
+        [Some(pool), None, ..] => Some(pool),
+        _ => None,
+    }
+}
+
+/// Runs the pool initializer analysis on the functions referencing `anchor`, returning the
+/// stores of the first one that has any free list linking in it.
+fn pool_init_stores<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    anchor: Operand<'e>,
+    end: Option<u64>,
+    functions: &FunctionFinder<'_, 'e, E>,
+) -> Option<ConstStores> {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let anchor = global_address(anchor)?;
+    let funcs = functions.functions();
+    let global_refs = functions.find_functions_using_global(
+        actx,
+        E::VirtualAddress::from_u64(anchor),
+    );
+    for global_ref in &global_refs {
+        let result = entry_of_until(binary, &funcs, global_ref.use_address, |entry| {
+            let mut stores = ConstStores {
+                stores: [(0, 0); MAX_CONST_STORES],
+                len: 0,
+            };
+            let mut analyzer = PoolInitAnalyzer::<E> {
+                stores: &mut stores,
+                inline_depth: 0,
+                phantom: Default::default(),
+            };
+            let mut analysis = FuncAnalysis::new(binary, ctx, entry);
+            analysis.analyze(&mut analyzer);
+            let found = match end {
+                Some(end) => push_loop_pool(&stores, end).is_some(),
+                None => collect_pools(&stores)[0].is_some(),
+            };
+            match found {
+                true => EntryOf::Ok(stores),
+                false => EntryOf::Retry,
+            }
+        }).into_option();
+        if result.is_some() {
+            return result;
+        }
+    }
+    None
+}
+
+struct PoolInitAnalyzer<'a, 'e, E: ExecutionState<'e>> {
+    stores: &'a mut ConstStores,
+    inline_depth: u8,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for PoolInitAnalyzer<'a, 'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        match *op {
+            Operation::Move(DestOperand::Memory(ref mem), value) => {
+                if mem.size != E::WORD_SIZE {
+                    return;
+                }
+                let mem = ctrl.resolve_mem(mem);
+                let address = match mem.if_constant_address() {
+                    Some(s) => s,
+                    None => return,
+                };
+                let value = match ctrl.resolve(value).if_constant() {
+                    Some(s) if s > 0x1000 => s,
+                    _ => return,
+                };
+                let stores = &mut *self.stores;
+                let new = (address, value);
+                if stores.len < MAX_CONST_STORES &&
+                    !stores.stores[..stores.len].contains(&new)
+                {
+                    stores.stores[stores.len] = new;
+                    stores.len += 1;
+                }
+            }
+            Operation::Call(dest) => {
+                if self.inline_depth == 0 {
+                    if let Some(dest) = ctrl.resolve_va(dest) {
+                        self.inline_depth = 1;
+                        ctrl.analyze_with_current_state(self, dest);
+                        self.inline_depth = 0;
+                    }
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
+/// Groups the free list linking stores into pools.
+///
+/// `entry[n].next = &entry[n + 1]` gives an entry size, and the lowest and highest addresses
+/// stored to with that same entry size give the first and last entry. The pool's end is
+/// either passed in, or is the address of the store that puts the base back into the free
+/// list head once the list is built: the closest global above the last entry that the base
+/// is stored to, at a whole number of entries away from it.
+fn collect_pools(stores: &ConstStores) -> [Option<PoolInfo>; MAX_POOLS] {
+    let mut result = [None; MAX_POOLS];
+    let mut count = 0;
+    let stores = &stores.stores[..stores.len];
+    for &(address, value) in stores {
+        let entry_size = match value.checked_sub(address) {
+            Some(s) if s >= 8 && s <= 0x1000 => s,
+            _ => continue,
+        };
+        let mut base = address;
+        let mut last = address;
+        for &(other, other_value) in stores {
+            if other_value.wrapping_sub(other) != entry_size {
+                continue;
+            }
+            if other.wrapping_sub(address) % entry_size == 0 {
+                base = base.min(other);
+                last = last.max(other);
+            }
+        }
+        if result[..count].iter().any(|x: &Option<PoolInfo>| {
+            x.is_some_and(|x| x.base == base && x.entry_size as u64 == entry_size)
+        }) {
+            continue;
+        }
+        let head = stores.iter()
+            .filter(|&&(head, head_value)| {
+                head_value == base && head > last &&
+                    head.wrapping_sub(base) % entry_size == 0
+            })
+            .map(|&(head, _)| head)
+            .min();
+        let (pool_end, free_list) = match head {
+            Some(head) => (head, Some(head)),
+            None => continue,
+        };
+        let entry_count = pool_end.checked_sub(base)
+            .filter(|x| x % entry_size == 0)
+            .map(|x| x / entry_size)
+            .unwrap_or(0);
+        if entry_count < 8 || entry_count > 0x10000 || count >= MAX_POOLS {
+            continue;
+        }
+        result[count] = Some(PoolInfo {
+            base,
+            entry_size: entry_size as u32,
+            entry_count: entry_count as u32,
+            free_list,
+        });
+        count += 1;
+    }
+    result
+}
+
+/// Finds a pool whose free list is built by pushing every entry onto a list head in turn,
+/// rather than by linking the entries in place and pointing the head at the first one.
+///
+/// The head is then written twice with two entry addresses one entry apart, which gives both
+/// the pool's base and its entry size; the pool runs from there up to `end`.
+fn push_loop_pool(stores: &ConstStores, end: u64) -> Option<PoolInfo> {
+    let mut best: Option<PoolInfo> = None;
+    for &(head, first) in stores.iter() {
+        if first >= end || first <= 0x1000 {
+            continue;
+        }
+        for &(other_head, second) in stores.iter() {
+            if other_head != head || second <= first || second >= end {
+                continue;
+            }
+            let entry_size = second.wrapping_sub(first);
+            if entry_size < 8 || entry_size > 0x1000 {
+                continue;
+            }
+            let entry_count = match end.wrapping_sub(first) {
+                x if x % entry_size == 0 => x / entry_size,
+                _ => continue,
+            };
+            if entry_count < 8 || entry_count > 0x10000 {
+                continue;
+            }
+            let pool = PoolInfo {
+                base: first,
+                entry_size: entry_size as u32,
+                entry_count: entry_count as u32,
+                free_list: Some(head),
+            };
+            // Analyzing more than two iterations of the loop would give entries further
+            // apart; the two that are adjacent are the right pair.
+            if best.is_none_or(|x| x.entry_size > pool.entry_size) {
+                best = Some(pool);
+            }
+        }
+    }
+    best
+}
+
+/// Finds the round robin player cursor that ai_spend_money steps at its start: the only
+/// global it increments and wraps back to zero at the player count.
+fn ai_spending_player_index<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    ai_spend_money: E::VirtualAddress,
+) -> Option<Operand<'e>> {
+    let mut analyzer = AiSpendingPlayerAnalyzer::<E> {
+        result: None,
+        jump_limit: 16,
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(actx.binary, actx.ctx, ai_spend_money);
+    analysis.analyze(&mut analyzer);
+    analyzer.result
+}
+
+struct AiSpendingPlayerAnalyzer<'e, E: ExecutionState<'e>> {
+    result: Option<Operand<'e>>,
+    jump_limit: u8,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for AiSpendingPlayerAnalyzer<'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        match *op {
+            Operation::Move(DestOperand::Memory(ref mem), value) => {
+                if mem.size != MemAccessSize::Mem32 {
+                    return;
+                }
+                let mem = ctrl.resolve_mem(mem);
+                if !mem.is_global() || mem.if_constant_address().is_none() {
+                    return;
+                }
+                let value = ctrl.resolve(value);
+                // The cursor may be masked or conditionally reset back to zero on the way to
+                // the store, so accept any value that was derived from stepping it by one.
+                let is_step = value.iter().any(|part| {
+                    part.if_arithmetic_add_const(1)
+                        .is_some_and(|x| x.unwrap_and_mask().if_memory() == Some(&mem))
+                });
+                if is_step {
+                    let ctx = ctrl.ctx();
+                    self.result = Some(ctx.memory(&mem));
+                    ctrl.end_analysis();
+                }
+            }
+            Operation::Jump { .. } => {
+                if self.jump_limit == 0 {
+                    ctrl.end_analysis();
+                } else {
+                    self.jump_limit -= 1;
+                }
+            }
+            _ => (),
+        }
+    }
+}

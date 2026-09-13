@@ -1949,3 +1949,242 @@ impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for
 
     }
 }
+
+/// Byte size of the statically allocated block that starts at `global`, taken from the
+/// largest zero fill the game does of it.
+///
+/// A block whose first field is initialized separately is zeroed from an offset instead of
+/// from its start, so the offset is counted back in.
+pub(crate) fn global_block_size<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    global: Operand<'e>,
+    functions: &FunctionFinder<'_, 'e, E>,
+) -> Option<u32> {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let address = global.if_constant()
+        .or_else(|| global.if_memory()?.if_constant_address())?;
+    let funcs = functions.functions();
+    let global_refs = functions.find_functions_using_global(
+        actx,
+        E::VirtualAddress::from_u64(address),
+    );
+    let mut result = 0u32;
+    for global_ref in &global_refs {
+        let size = entry_of_until(binary, &funcs, global_ref.use_address, |entry| {
+            let mut analyzer = GlobalZeroFillAnalyzer::<E> {
+                address,
+                result: 0,
+                phantom: Default::default(),
+            };
+            let mut analysis = FuncAnalysis::new(binary, ctx, entry);
+            analysis.analyze(&mut analyzer);
+            match analyzer.result {
+                0 => EntryOf::Retry,
+                size => EntryOf::Ok(size),
+            }
+        }).into_option().unwrap_or(0);
+        result = result.max(size);
+    }
+    Some(result).filter(|&x| x != 0)
+}
+
+struct GlobalZeroFillAnalyzer<'e, E: ExecutionState<'e>> {
+    address: u64,
+    result: u32,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for GlobalZeroFillAnalyzer<'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        let Operation::Call(_) = *op else {
+            return;
+        };
+        let start = match ctrl.resolve_arg(0).if_constant() {
+            Some(s) => s,
+            None => return,
+        };
+        let offset = match start.checked_sub(self.address) {
+            Some(s) if s < 0x1000 => s,
+            _ => return,
+        };
+        // memset(block, 0, size), or the save/load pair, which writes the block in one go
+        // as (block, size, file).
+        let ctx = ctrl.ctx();
+        let arg2 = ctrl.resolve_arg(1);
+        let size = match arg2.if_constant() {
+            Some(s) if s >= 0x40 => s,
+            _ => match arg2 == ctx.const_0() {
+                true => ctrl.resolve_arg(2).if_constant().unwrap_or(0),
+                false => return,
+            }
+        };
+        if size == 0 || size >= 0x8000_0000 {
+            return;
+        }
+        self.result = self.result.max(offset.wrapping_add(size) as u32);
+    }
+}
+
+/// Byte sizes of statically sized simulation state blocks, for code that has to copy them.
+#[derive(Copy, Clone, Default)]
+pub struct StateBlockSizes {
+    /// Block the `pathing` global points at.
+    pub pathing_state: u32,
+    /// Block `path_array` points at, and the size of one entry in it.
+    pub path_array: u32,
+    pub path_entry: u32,
+    pub player_ai: u32,
+    pub trigger_completed_units_cache: u32,
+    pub resource_areas: u32,
+}
+
+/// Extents of the pathing state and the path pool, both of which are one allocation that is
+/// immediately zeroed.
+pub struct PathingExtents {
+    /// Byte size of the block the `pathing` global points at.
+    pub pathing_state_size: u32,
+    /// Byte size of the block `path_array` points at.
+    pub path_array_size: u32,
+    pub path_entry_size: u32,
+}
+
+/// Finds the allocation sizes of the pathing state and the path pool.
+///
+/// Both are allocated as one block and then zeroed with the same constant size, which is what
+/// identifies the allocation among the other calls of their initializer. The path pool's entry
+/// size follows from `first_free_path` being advanced past the first entry once the free list
+/// is linked.
+pub(crate) fn pathing_extents<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    pathing: Operand<'e>,
+    path_array: Operand<'e>,
+    first_free_path: Operand<'e>,
+    functions: &FunctionFinder<'_, 'e, E>,
+) -> PathingExtents {
+    let mut result = PathingExtents {
+        pathing_state_size: 0,
+        path_array_size: 0,
+        path_entry_size: 0,
+    };
+    result.pathing_state_size = allocation_size(actx, pathing, None, functions).0;
+    let (size, entry_size) = allocation_size(actx, path_array, Some(first_free_path), functions);
+    result.path_array_size = size;
+    result.path_entry_size = entry_size;
+    result
+}
+
+/// Size of the single allocation stored in `global`, and, if `stepped_global` is given, the
+/// constant that global is stepped by in the same function.
+fn allocation_size<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    global: Operand<'e>,
+    stepped_global: Option<Operand<'e>>,
+    functions: &FunctionFinder<'_, 'e, E>,
+) -> (u32, u32) {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let address = match global.if_memory().and_then(|x| x.if_constant_address()) {
+        Some(s) => s,
+        None => return (0, 0),
+    };
+    let stepped = stepped_global.and_then(|x| x.if_memory()?.if_constant_address());
+    let funcs = functions.functions();
+    let global_refs = functions.find_functions_using_global(
+        actx,
+        E::VirtualAddress::from_u64(address),
+    );
+    for global_ref in &global_refs {
+        let result = entry_of_until(binary, &funcs, global_ref.use_address, |entry| {
+            let mut analyzer = AllocationSizeAnalyzer::<E> {
+                global: address,
+                stepped,
+                allocation_sizes: [0; 8],
+                allocation_count: 0,
+                size: 0,
+                step: 0,
+                phantom: Default::default(),
+            };
+            let mut analysis = FuncAnalysis::new(binary, ctx, entry);
+            analysis.analyze(&mut analyzer);
+            match analyzer.size {
+                0 => EntryOf::Retry,
+                size => EntryOf::Ok((size, analyzer.step)),
+            }
+        }).into_option();
+        if let Some(result) = result {
+            return result;
+        }
+    }
+    (0, 0)
+}
+
+struct AllocationSizeAnalyzer<'e, E: ExecutionState<'e>> {
+    /// Address of the global that the allocation is stored to.
+    global: u64,
+    /// Global that gets advanced by one entry, if the caller asked for the entry size.
+    stepped: Option<u64>,
+    /// Constant first arguments of the calls made so far, in Custom id order.
+    allocation_sizes: [u64; 8],
+    allocation_count: u8,
+    size: u32,
+    step: u32,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for AllocationSizeAnalyzer<'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        match *op {
+            Operation::Call(_) => {
+                // Tag every call's return value with the constant size it was asked for, so
+                // that the store into the global says which call allocated the block.
+                let arg1 = match ctrl.resolve_arg(0).if_constant() {
+                    Some(s) if s > 0x100 && s < 0x8000_0000 => s,
+                    _ => return,
+                };
+                let index = self.allocation_count as usize;
+                if index < self.allocation_sizes.len() {
+                    self.allocation_sizes[index] = arg1;
+                    self.allocation_count += 1;
+                    let ctx = ctrl.ctx();
+                    ctrl.do_call_with_result(ctx.custom(index as u32));
+                }
+            }
+            Operation::Move(DestOperand::Memory(ref mem), value) => {
+                let mem = ctrl.resolve_mem(mem);
+                let address = match mem.if_constant_address() {
+                    Some(s) => s,
+                    None => return,
+                };
+                let value = ctrl.resolve(value);
+                if address == self.global && self.size == 0 {
+                    let size = value.if_custom()
+                        .and_then(|x| self.allocation_sizes.get(x as usize));
+                    if let Some(&size) = size {
+                        self.size = size as u32;
+                    }
+                } else if self.stepped == Some(address) && self.step == 0 {
+                    // first_free_path is moved past the entry the free list linking left
+                    // out, which the compiler may write as a subtraction of a negative.
+                    let (_, offset) = value.add_sub_offset();
+                    let mask = match E::VirtualAddress::SIZE {
+                        4 => 0xffff_ffff,
+                        _ => u64::MAX,
+                    };
+                    let candidates = [offset & mask, 0u64.wrapping_sub(offset) & mask];
+                    if let Some(&step) = candidates.iter().find(|&&x| x >= 8 && x < 0x10000) {
+                        self.step = step as u32;
+                    }
+                }
+                if self.size != 0 && (self.stepped.is_none() || self.step != 0) {
+                    ctrl.end_analysis();
+                }
+            }
+            _ => (),
+        }
+    }
+}

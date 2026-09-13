@@ -1626,7 +1626,7 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 LoadConsoles | InitConsoles | GetUiConsoles | GetStatResIconsDdsGrp |
                 GetUnitSkin | JoinCustomGame | FindFileWithCrc | ForFilesInDir |
                 SimpleFileMatchCallback | GetLocales | InitGameMap | SaveReplay |
-                AdvanceTurnTimerAndStepNetwork => continue,
+                AdvanceTurnTimerAndStepNetwork | RecordTurnSyncSlot => continue,
             _ => (),
         }
         assert!(result.is_some(), "Missing {}", addr.name());
@@ -1647,7 +1647,11 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 RgbColors | DisableColorChoice | UseMapSetRgbColor | SfxData | SoundChannels |
                 Images | TilesetCv5 | TilesetData | TilesetVx4Ex | TileDefaultFlags |
                 MinitileGraphics | MinitileData | FoliageState | CreepOriginalTiles |
-                CreepTileBorders | CursorScaleFactor =>
+                CreepTileBorders | CursorScaleFactor | SyncSlotIndex | SyncCheckKindIndex |
+                SyncCheckKindCount | SyncCheckKinds | SyncMapRowIndex |
+                CapturedMinimapUnitVisionSyncValue | CapturedMinimapMarkerCountSyncValue |
+                CurrentSyncStateByte | CurrentSyncCheckHash | CurrentSyncVisionBytes |
+                AiSpendingPlayerIndex =>
             {
                 continue;
             }
@@ -1694,7 +1698,9 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 FirstFreePlacementImage | LastFreePlacementImage | FirstFreePlacementRect |
                 LastFreePlacementRect | TilesetIndexedMapTiles | Vx4MapTiles | RepulseState |
                 TerrainFramebuf | StatportVideos | StatportTalkingPortraitActive |
-                StatportVideoId | NgdpEnabled | MinimapColorMode | GameFrameCount =>
+                StatportVideoId | NgdpEnabled | MinimapColorMode | GameFrameCount |
+                WorkerAiFreeList | BuildingAiFreeList | AiTownFreeList | AiScriptFreeList |
+                MilitaryAiFreeList | GuardAiFreeList =>
             {
                 check_global_opt(result, binary, op.name());
             }
@@ -1711,7 +1717,11 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 DcreepListBegin | DcreepListSize | ReplayHeader | GameScreenRectWinPx |
                 RunDialogStack | LurkerHits | ResourceAreas | HpBarImages | HpBarState |
                 SelectionCircles | PlacementImages | PlacementRects | ShieldOverlays | ImagesRel |
-                SnetLocalPlayerList | SnetPlayerList | NgdpInstance =>
+                SnetLocalPlayerList | SnetPlayerList | NgdpInstance |
+                LocalSelection | SelectionHotkeyLastUsedFrames |
+                WorkerAiPoolStorage | BuildingAiPoolStorage | AiTownPoolStorage |
+                AiScriptPoolStorage | MilitaryAiPoolStorage | GuardAiPoolStorage |
+                DcreepStatePool =>
             {
                 check_global_struct_opt(result, binary, op.name());
             }
