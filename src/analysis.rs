@@ -591,6 +591,10 @@ results! {
             cache_check_resources_for_building,
         CancelUnit => cancel_unit => cache_cancel_unit_finding,
         RandSynced => rand_synced => cache_rng,
+        // Allocation functions used alongside the `allocator` vtable object; plain
+        // functions over the same OS heap, taking (size/ptr, tag, tag2, flags).
+        EngineAlloc => engine_alloc => cache_engine_alloc_funcs,
+        EngineFree => engine_free => cache_engine_alloc_funcs,
     }
 }
 
@@ -2266,6 +2270,19 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
             let switch = s.process_commands_switch(actx)?;
             let result = commands::print_text(actx, process_commands, &switch);
             Some(([result.print_text, result.add_to_replay_data], []))
+        })
+    }
+
+    fn add_to_replay_data(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<E::VirtualAddress> {
+        self.cache_many_addr(AddressAnalysis::AddToReplayData, |s| s.cache_print_text(actx))
+    }
+
+    fn cache_engine_alloc_funcs(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        self.cache_many(&[EngineAlloc, EngineFree], &[], |s| {
+            let add_to_replay_data = s.add_to_replay_data(actx)?;
+            let result = game::engine_alloc_funcs(actx, add_to_replay_data);
+            Some(([result.engine_alloc, result.engine_free], []))
         })
     }
 

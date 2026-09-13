@@ -88,6 +88,8 @@ draw_tooltip_layer: 006cd250
 drop_powerup: 00693910
 duplicate_sprite: 006656e0
 end_collision_tracking: 0066e7d0
+engine_alloc: 0099adb0
+engine_free: 0099adf0
 file_exists: 006365a0
 file_read_fatal_error: 009cd550
 find_file_with_crc: None
