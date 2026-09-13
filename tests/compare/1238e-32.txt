@@ -607,6 +607,7 @@ tooltip_draw_func: Mem32[1002160]
 tranwire_ddsgrp: 1019868
 tranwire_grp: Mem32[1019850]
 trigger_current_player: Mem32[100f694]
+trigger_execution_timer: Mem16[100f690]
 turn_duration_by_speed: 10099bc
 turn_timer_accumulator: Mem32[10099d8]
 ui_consoles: 1009d60

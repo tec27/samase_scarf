@@ -607,6 +607,7 @@ tooltip_draw_func: Mem32[db78b0]
 tranwire_ddsgrp: fbbea4
 tranwire_grp: Mem32[fbbe8c]
 trigger_current_player: Mem32[fc2d18]
+trigger_execution_timer: Mem16[fc2d14]
 turn_duration_by_speed: f74514
 turn_timer_accumulator: Mem32[f74530]
 ui_consoles: None
