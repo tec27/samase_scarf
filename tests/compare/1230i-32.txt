@@ -102,6 +102,7 @@ file_read_fatal_error: 008ecf20
 find_file_with_crc: None
 find_fow_sprite_for_click: 007222c0
 find_game_type_template: 006ba660
+find_nearest_palette_color: 006d4130
 find_nearest_unit_around_unit: 00683780
 find_nearest_unit_in_area: 00683860
 find_nearest_unit_in_area_point: 00683980
@@ -478,6 +479,7 @@ images_loaded: Mem8[fe34a2]
 images_rel: e08c30
 in_lobby_or_game: None
 is_custom_single_player: Mem32[101ef28]
+is_cycling_color_table: Mem32[fe348c]
 is_multiplayer: Mem8[1006404]
 is_paused: Mem32[e12458]
 is_placing_building: Mem32[100b204]
