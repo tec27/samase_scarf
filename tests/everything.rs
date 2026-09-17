@@ -1713,7 +1713,8 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 BuiltinTurnLatency | GameFrameCount | StormTurnBase | StormTurnMinInterval |
                 StormTurnLagThreshold | GameTypeTemplates | MatchmakerSessionCount |
                 WorkerAiFreeList | BuildingAiFreeList | AiTownFreeList | AiScriptFreeList |
-                MilitaryAiFreeList | GuardAiFreeList | UnitPositionSearchEntryCount =>
+                MilitaryAiFreeList | GuardAiFreeList | UnitPositionSearchEntryCount |
+                IsCyclingColorTable =>
             {
                 check_global_opt(result, binary, op.name());
             }
