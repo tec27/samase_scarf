@@ -40,6 +40,7 @@ anim_asset_change_cb: 00549320
 apply_lobby_force_cmd: 006b2c50
 apply_pending_player_leaves: 006cd280
 attack_unit: 00565b70
+build_replay_file_path: 006e2450
 building_placement_lclick: 006dbe10
 building_placement_rclick: 00646cb0
 calculate_path: 006ee270
@@ -240,6 +241,7 @@ run_dialog: 008d3d80
 run_menus: 006884b0
 run_modern_dialog: 0087e810
 save_replay: 006e3a00
+save_replay_by_name: 006e26b0
 sc_main: 0069a150
 select_map_entry: 005b2e00
 select_mouse_move: 00721a00
