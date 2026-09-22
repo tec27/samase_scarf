@@ -361,6 +361,7 @@ results! {
         OpenFile => open_file,
         DrawGameLayer => draw_game_layer,
         RenderScreen => render_screen => cache_game_loop,
+        SkipRender => skip_render => cache_game_loop,
         LoadPcx => load_pcx => cache_game_loop,
         SetMusic => set_music => cache_game_loop,
         StepIscript => step_iscript,
@@ -4564,8 +4565,8 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
         use AddressAnalysis::*;
         use OperandAnalysis::*;
         self.cache_many(
-            &[StepNetwork, RenderScreen, LoadPcx, SetMusic, StepGameLoop, ProcessEvents,
-            StepGameLogic],
+            &[StepNetwork, RenderScreen, SkipRender, LoadPcx, SetMusic, StepGameLoop,
+            ProcessEvents, StepGameLogic],
             &[MainPalette, PaletteSet, TfontGam, SyncActive, SyncData, MenuScreenId,
             ContinueGameLoop, AntiTroll, StepGameFrames, NextGameStepTick, ReplaySeekFrame],
             |s|
@@ -4573,8 +4574,8 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
             let game_loop = s.game_loop(actx)?;
             let game = s.game(actx)?;
             let result = game_init::analyze_game_loop(actx, game_loop, game);
-            Some(([result.step_network, result.render_screen, result.load_pcx, result.set_music,
-                result.step_game_loop, result.process_events, result.step_game_logic],
+            Some(([result.step_network, result.render_screen, result.skip_render, result.load_pcx,
+                result.set_music, result.step_game_loop, result.process_events, result.step_game_logic],
                 [result.main_palette, result.palette_set, result.tfontgam, result.sync_active,
                 result.sync_data, result.menu_screen_id, result.continue_game_loop,
                 result.anti_troll, result.step_game_frames, result.next_game_step_tick,

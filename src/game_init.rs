@@ -103,6 +103,7 @@ pub(crate) struct LoadImagesAnalysis<'e, Va: VirtualAddress> {
 pub(crate) struct GameLoopAnalysis<'e, Va: VirtualAddress> {
     pub step_network: Option<Va>,
     pub render_screen: Option<Va>,
+    pub skip_render: Option<Va>,
     pub load_pcx: Option<Va>,
     pub set_music: Option<Va>,
     pub step_game_loop: Option<Va>,
@@ -4067,6 +4068,7 @@ pub(crate) fn analyze_game_loop<'e, E: ExecutionState<'e>>(
         set_music: None,
         step_network: None,
         render_screen: None,
+        skip_render: None,
         step_game_loop: None,
         step_game_logic: None,
         process_events: None,
@@ -4103,6 +4105,11 @@ pub(crate) fn analyze_game_loop<'e, E: ExecutionState<'e>>(
     let mut analysis = FuncAnalysis::new(binary, ctx, game_loop);
     analysis.analyze(&mut analyzer);
     if let Some(step_game_loop) = analyzer.step_game_loop_analysis_start {
+        result.skip_render = analyze_skip_render(
+            actx,
+            step_game_loop,
+            result.continue_game_loop,
+        );
         let mut analyzer = StepGameLoopAnalyzer::<E> {
             result: &mut result,
             game,
@@ -4614,6 +4621,69 @@ impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for StepGameLoopAnaly
     }
 }
 
+// The native loop's continue_game_loop == 0 branch calls this cleanup instead of
+// render_screen, preserving the renderer's per-frame finalization without queuing draw work.
+fn analyze_skip_render<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    step_game_loop: E::VirtualAddress,
+    continue_game_loop: Option<Operand<'e>>,
+) -> Option<E::VirtualAddress> {
+    let continue_game_loop = continue_game_loop?;
+    let mut analyzer = SkipRenderAnalyzer::<E> {
+        continue_game_loop,
+        result: None,
+        state: SkipRenderState::FindContinueGameLoop,
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(actx.binary, actx.ctx, step_game_loop);
+    analysis.analyze(&mut analyzer);
+    analyzer.result
+}
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum SkipRenderState {
+    FindContinueGameLoop,
+    FindCall,
+}
+
+struct SkipRenderAnalyzer<'e, E: ExecutionState<'e>> {
+    continue_game_loop: Operand<'e>,
+    result: Option<E::VirtualAddress>,
+    state: SkipRenderState,
+    phantom: std::marker::PhantomData<E>,
+}
+
+impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for SkipRenderAnalyzer<'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        match self.state {
+            SkipRenderState::FindContinueGameLoop => {
+                if let Operation::Jump { condition, to } = *op {
+                    let condition = ctrl.resolve(condition);
+                    let skip_render = condition.if_arithmetic_eq_neq_zero(ctrl.ctx())
+                        .filter(|x| {
+                            Operand::and_masked(x.0).0 == self.continue_game_loop
+                        })
+                        .map(|x| x.1);
+                    if let Some(eq_zero) = skip_render {
+                        self.state = SkipRenderState::FindCall;
+                        ctrl.clear_unchecked_branches();
+                        ctrl.continue_at_eq_address(eq_zero, to);
+                    }
+                }
+            }
+            SkipRenderState::FindCall => {
+                if let Operation::Call(dest) = *op {
+                    if let Some(dest) = ctrl.resolve_va(dest) {
+                        self.result = Some(dest);
+                        ctrl.end_analysis();
+                    }
+                }
+            }
+        }
+    }
+}
 fn is_casei_cstring<Va: VirtualAddress>(
     binary: &BinaryFile<Va>,
     address: Va,

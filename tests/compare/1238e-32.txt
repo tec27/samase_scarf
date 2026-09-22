@@ -272,6 +272,7 @@ show_unit: 00898e40
 simple_file_match_callback: 008abcc0
 single_player_map_end: 0063a930
 single_player_start: 007f4840
+skip_render: 009e5e80
 snet_drain_deferred_queue: 008b1a20
 snet_initialize_provider: 008b41f0
 snet_recv_packets: 008b5cd0
