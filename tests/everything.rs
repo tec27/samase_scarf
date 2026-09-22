@@ -1619,6 +1619,7 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
         }
         match addr {
             // special handling
+            // Older and transitional builds have no separately identifiable SFX asset loader.
             JoinGame | UnitUpdateSpeed | StartUdpServer | InitSkins | StepGameLoop |
                 LoadSfxAudioObject |
                 GetMouseX | GetMouseY | NetFormatTurnRate | ReadWholeMpqFile |

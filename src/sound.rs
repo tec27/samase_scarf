@@ -189,6 +189,7 @@ impl<'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for LoadSfxAudioObjectAnalyz
         }
     }
 }
+
 fn is_sfx_audio_object_loader<'e, E: ExecutionState<'e>>(
     binary: &'e scarf::BinaryFile<E::VirtualAddress>,
     ctx: scarf::OperandCtx<'e>,
@@ -231,6 +232,7 @@ fn is_sfx_audio_object_loader<'e, E: ExecutionState<'e>>(
     analysis.analyze(&mut analyzer);
     analyzer.result
 }
+
 struct PlaySoundFnAnalyzer<'a, 'e, E: ExecutionState<'e>> {
     result: &'a mut PlaySound<'e>,
     arg_cache: &'a ArgCache<'e, E>,
