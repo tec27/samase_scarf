@@ -127,6 +127,58 @@ pub(crate) fn analyze_play_sound<'e, E: ExecutionState<'e>>(
     result
 }
 
+pub(crate) fn load_sfx_audio_object<'e, E: ExecutionState<'e>>(
+    analysis: &AnalysisCtx<'e, E>,
+    play_sound: E::VirtualAddress,
+    sfx_data: Operand<'e>,
+) -> Option<E::VirtualAddress> {
+    let ctx = analysis.ctx;
+    let binary = analysis.binary;
+    let mut analyzer = LoadSfxAudioObjectAnalyzer::<E> {
+        sfx_data,
+        sound_id: analysis.arg_cache.on_entry(0),
+        result: None,
+        inline_depth: 0,
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, play_sound);
+    analysis.analyze(&mut analyzer);
+    analyzer.result
+}
+
+struct LoadSfxAudioObjectAnalyzer<'e, E: ExecutionState<'e>> {
+    sfx_data: Operand<'e>,
+    sound_id: Operand<'e>,
+    result: Option<E::VirtualAddress>,
+    inline_depth: u8,
+}
+
+impl<'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for LoadSfxAudioObjectAnalyzer<'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        if let Operation::Call(dest) = *op {
+            let Some(dest) = ctrl.resolve_va(dest) else { return };
+            let ctx = ctrl.ctx();
+            if self.inline_depth == 0 {
+                let arg0 = ctx.and_const(ctrl.resolve_arg(0), 0xffff_ffff);
+                let sound_id = ctx.and_const(self.sound_id, 0xffff_ffff);
+                if arg0 == sound_id {
+                    self.inline_depth = 1;
+                    ctrl.analyze_with_current_state(self, dest);
+                    self.inline_depth = 0;
+                }
+            } else {
+                let arg1 = ctx.and_const(ctrl.resolve_arg(1), 0xffff_ffff);
+                let sound_id = ctx.and_const(self.sound_id, 0xffff_ffff);
+                let arg0 = ctrl.resolve_arg(0);
+                if arg1 == sound_id && arg0.iter().any(|x| x == self.sfx_data) {
+                    self.result = Some(dest);
+                    ctrl.end_analysis();
+                }
+            }
+        }
+    }
+}
 struct PlaySoundFnAnalyzer<'a, 'e, E: ExecutionState<'e>> {
     result: &'a mut PlaySound<'e>,
     arg_cache: &'a ArgCache<'e, E>,
