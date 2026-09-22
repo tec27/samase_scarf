@@ -1620,6 +1620,7 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
         match addr {
             // special handling
             JoinGame | UnitUpdateSpeed | StartUdpServer | InitSkins | StepGameLoop |
+                LoadSfxAudioObject |
                 GetMouseX | GetMouseY | NetFormatTurnRate | ReadWholeMpqFile |
                 ReadWholeMpqFile2 | StepBulletFrame | FlingyUpdateTargetDir |
                 LookupSoundId | SFileOpenFileEx | SFileReadFileEx | SFileCloseFile |

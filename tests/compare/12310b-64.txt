@@ -185,6 +185,7 @@ load_image_overlays: 140360c90
 load_images: 14018a440
 load_pcx: 140310a10
 load_replay_scenario_chk: 14037aca0
+load_sfx_audio_object: 1403fc090
 load_snp_list: 14041f740
 lookup_sound_id: 140272f10
 mainmenu_entry_hook: 14037545e

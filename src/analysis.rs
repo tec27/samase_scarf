@@ -215,6 +215,7 @@ results! {
         CheckDatRequirements => check_dat_requirements,
         GiveAi => give_ai,
         PlaySound => play_sound,
+        LoadSfxAudioObject => load_sfx_audio_object,
         AiPrepareMovingTo => ai_prepare_moving_to,
         StepReplayCommands => step_replay_commands,
         SaveReplay => save_replay => cache_save_replay,
@@ -1772,6 +1773,9 @@ impl<'e, E: ExecutionState<'e>> Analysis<'e, E> {
         self.enter(AnalysisCache::play_sound)
     }
 
+    pub fn load_sfx_audio_object(&mut self) -> Option<E::VirtualAddress> {
+        self.enter(AnalysisCache::load_sfx_audio_object)
+    }
     pub fn do_missile_damage(&mut self) -> Option<E::VirtualAddress> {
         self.enter(AnalysisCache::do_missile_damage)
     }
@@ -4058,6 +4062,15 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
         })
     }
 
+    fn load_sfx_audio_object(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<E::VirtualAddress> {
+        self.cache_single_address(AddressAnalysis::LoadSfxAudioObject, |s| {
+            let play_sound = s.play_sound(actx)?;
+            s.cache_play_sound(actx);
+            let sfx_data = s.operand_results[OperandAnalysis::SfxData as usize]
+                .filter(|&x| x != s.operand_not_found)?;
+            sound::load_sfx_audio_object(actx, play_sound, sfx_data)
+        })
+    }
     fn do_missile_damage(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<E::VirtualAddress> {
         self.cache_single_address(AddressAnalysis::DoMissileDamage, |s| {
             bullets::do_missile_damage(actx, s.step_iscript_switch(actx)?)

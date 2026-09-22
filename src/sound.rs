@@ -137,6 +137,7 @@ pub(crate) fn load_sfx_audio_object<'e, E: ExecutionState<'e>>(
     let mut analyzer = LoadSfxAudioObjectAnalyzer::<E> {
         sfx_data,
         sound_id: analysis.arg_cache.on_entry(0),
+        loader_sound_id: analysis.arg_cache.on_entry(1),
         result: None,
         inline_depth: 0,
     };
@@ -148,6 +149,7 @@ pub(crate) fn load_sfx_audio_object<'e, E: ExecutionState<'e>>(
 struct LoadSfxAudioObjectAnalyzer<'e, E: ExecutionState<'e>> {
     sfx_data: Operand<'e>,
     sound_id: Operand<'e>,
+    loader_sound_id: Operand<'e>,
     result: Option<E::VirtualAddress>,
     inline_depth: u8,
 }
@@ -171,13 +173,63 @@ impl<'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for LoadSfxAudioObjectAnalyz
                 let arg1 = ctx.and_const(ctrl.resolve_arg(1), 0xffff_ffff);
                 let sound_id = ctx.and_const(self.sound_id, 0xffff_ffff);
                 let arg0 = ctrl.resolve_arg(0);
-                if arg1 == sound_id && arg0.iter().any(|x| x == self.sfx_data) {
+                if arg1 == sound_id && arg0.iter().any(|x| x == self.sfx_data) &&
+                    is_sfx_audio_object_loader::<E>(
+                        ctrl.binary(),
+                        ctx,
+                        dest,
+                        self.sfx_data,
+                        self.loader_sound_id,
+                    )
+                {
                     self.result = Some(dest);
                     ctrl.end_analysis();
                 }
             }
         }
     }
+}
+fn is_sfx_audio_object_loader<'e, E: ExecutionState<'e>>(
+    binary: &'e scarf::BinaryFile<E::VirtualAddress>,
+    ctx: scarf::OperandCtx<'e>,
+    entry: E::VirtualAddress,
+    sfx_data: Operand<'e>,
+    sound_id: Operand<'e>,
+) -> bool {
+    struct Analyzer<'e, E: ExecutionState<'e>> {
+        sfx_data: Operand<'e>,
+        sound_id: Operand<'e>,
+        result: bool,
+        phantom: std::marker::PhantomData<E>,
+    }
+
+    impl<'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for Analyzer<'e, E> {
+        type State = analysis::DefaultState;
+        type Exec = E;
+        fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+            if let Operation::Move(_, value) = *op {
+                let value = ctrl.resolve(value);
+                let ctx = ctrl.ctx();
+                let sound_id = ctx.and_const(self.sound_id, 0xffff_ffff);
+                if value.iter().any(|x| x == self.sfx_data) &&
+                    value.iter().any(|x| ctx.and_const(x, 0xffff_ffff) == sound_id)
+                {
+                    self.result = true;
+                    ctrl.end_analysis();
+                }
+            }
+        }
+    }
+
+    let mut analyzer = Analyzer::<E> {
+        sfx_data,
+        sound_id,
+        result: false,
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, entry);
+    analysis.analyze(&mut analyzer);
+    analyzer.result
 }
 struct PlaySoundFnAnalyzer<'a, 'e, E: ExecutionState<'e>> {
     result: &'a mut PlaySound<'e>,
