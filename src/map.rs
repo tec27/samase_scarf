@@ -1,3 +1,4 @@
+use bumpalo::collections::Vec as BumpVec;
 use scarf::{DestOperand, FlagUpdate, FlagArith, MemAccessSize, Operand, Operation};
 use scarf::analysis::{self, Control, FuncAnalysis};
 use scarf::exec_state::{ExecutionState, VirtualAddress};
@@ -6,7 +7,8 @@ use crate::analysis::{AnalysisCtx, ArgCache};
 use crate::analysis_find::{EntryOf, FunctionFinder, entry_of_until_with_limit};
 use crate::call_tracker::{CallTracker};
 use crate::util::{
-    ControlExt, ExecStateExt, MemAccessExt, OperandExt, OptionExt, is_global, single_result_assign,
+    ControlExt, ExecStateExt, MemAccessExt, OperandExt, OptionExt, bumpvec_with_capacity,
+    is_global, single_result_assign,
 };
 
 pub struct MapTileFlags<'e, Va: VirtualAddress> {
@@ -19,6 +21,9 @@ pub struct RunTriggers<'e, Va: VirtualAddress> {
     pub conditions: Option<Va>,
     pub actions: Option<Va>,
     pub trigger_execution_timer: Option<Operand<'e>>,
+    /// The function main_game_loop calls to step triggers; it contains
+    /// trigger_execution_timer countdown and calls run_player_triggers.
+    pub step_triggers: Option<Va>,
 }
 
 impl<'e, Va: VirtualAddress> Default for RunTriggers<'e, Va> {
@@ -27,6 +32,7 @@ impl<'e, Va: VirtualAddress> Default for RunTriggers<'e, Va> {
             conditions: None,
             actions: None,
             trigger_execution_timer: None,
+            step_triggers: None,
         }
     }
 }
@@ -407,6 +413,9 @@ impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for RunTriggersAnalyz
                             ctrl.analyze_with_current_state(self, dest);
                             self.inline_depth -= 1;
                             if self.result.conditions.is_some() {
+                                if self.result.step_triggers.is_none() {
+                                    self.result.step_triggers = Some(dest);
+                                }
                                 ctrl.end_analysis();
                             }
                         } else {
@@ -872,6 +881,385 @@ impl<'a, 'acx, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for
                     }
                 }
             }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct StepTriggersState<'e> {
+    pub player_trigger_lists: Option<Operand<'e>>,
+    pub trigger_elapsed_time_tick_timer: Option<Operand<'e>>,
+    pub leaderboard_refresh_timer: Option<Operand<'e>>,
+    pub player_trigger_wait_active_flags: Option<Operand<'e>>,
+    pub player_trigger_wait_timers: Option<Operand<'e>>,
+    pub player_trigger_victory_states: Option<Operand<'e>>,
+    pub player_trigger_active_flags: Option<Operand<'e>>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum StepTriggersBranch<'e> {
+    /// Branch taken when the Mem16 countdown timer was 0 before being decremented.
+    TimerExpired(Operand<'e>),
+    /// Branch taken when the Mem8 global is nonzero.
+    FlagSet(Operand<'e>),
+}
+
+/// Finds the static trigger runtime state that step_triggers(elapsed_ticks) advances
+/// every frame. The per-frame timer / wait update is either inlined to step_triggers or
+/// a separate function that is called with elapsed_ticks, which gets inlined here.
+///
+/// - Countdown timers are Mem16 globals stored as `timer - 1`, followed by a jump on the
+///   old value being 0.
+///   - trigger_elapsed_time_tick_timer: its expiration increments the elapsed game
+///     seconds (game + 0xe608).
+///   - leaderboard_refresh_timer: the other timer that is reloaded with 0xf in the first
+///     block of its expiration branch.
+/// - player_trigger_wait_timers[player] is compared against u32::MAX right after
+///   checking player_trigger_wait_active_flags[player] to be nonzero.
+/// - player_trigger_victory_states is zeroed as a whole (at least 4 bytes) once
+///   trigger_execution_timer expires.
+/// - player_trigger_active_flags[player] is checked to be nonzero just before checking
+///   game player victory state (game + 0xe610 + player).
+/// - Victory states and active flags are also found from update_trigger_victory_states,
+///   see `trigger_flags_from_update_victory_states`.
+/// - player_trigger_lists[player].count is compared against 0 for the current trigger
+///   player; the list header is `{ next, prev, count }`, three words.
+pub(crate) fn step_triggers_state<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    step_triggers: E::VirtualAddress,
+    trigger_execution_timer: Operand<'e>,
+    game: Operand<'e>,
+) -> StepTriggersState<'e> {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let bump = &actx.bump;
+    let mut result = StepTriggersState::default();
+    let mut analyzer = StepTriggersStateAnalyzer::<E> {
+        result: &mut result,
+        trigger_execution_timer,
+        game,
+        elapsed_ticks: ctx.and_const(actx.arg_cache.on_entry(0), 0xffff_ffff),
+        inline_depth: 0,
+        next_custom: 0,
+        branch_starts: bumpvec_with_capacity(0x20, bump),
+        current_branch: None,
+        last_countdown: None,
+        leaderboard_candidates: bumpvec_with_capacity(4, bump),
+        calls_after_player_loop: bumpvec_with_capacity(8, bump),
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, step_triggers);
+    analysis.analyze(&mut analyzer);
+    let leaderboard_candidates = analyzer.leaderboard_candidates;
+    let calls_after_player_loop = analyzer.calls_after_player_loop;
+    for &timer in leaderboard_candidates.iter() {
+        if Some(timer) != result.trigger_elapsed_time_tick_timer {
+            single_result_assign(Some(timer), &mut result.leaderboard_refresh_timer);
+        }
+    }
+    // Neither of the above is visible on all builds: some 32-bit builds clear victory
+    // states with an SSE store that doesn't get analyzed as a memory write, and old builds
+    // don't check player_trigger_active_flags in step_triggers. Both can also be found from
+    // update_trigger_victory_states, which step_triggers calls after running player
+    // triggers.
+    let need_fallback = result.player_trigger_victory_states.is_none() ||
+        result.player_trigger_active_flags.is_none();
+    if need_fallback || crate::util::test_assertions() {
+        for &func in calls_after_player_loop.iter() {
+            if let Some((active_flags, victory_states)) =
+                trigger_flags_from_update_victory_states::<E>(actx, func)
+            {
+                single_result_assign(
+                    Some(active_flags),
+                    &mut result.player_trigger_active_flags,
+                );
+                single_result_assign(
+                    Some(victory_states),
+                    &mut result.player_trigger_victory_states,
+                );
+                break;
+            }
+        }
+    }
+    result
+}
+
+/// update_trigger_victory_states counts players whose victory state is >= 3 among
+/// players with player_trigger_active_flags set:
+/// `if player_trigger_active_flags[i] != 0 { if player_trigger_victory_states[i] >= 3 {`
+///
+/// Returns (player_trigger_active_flags, player_trigger_victory_states).
+fn trigger_flags_from_update_victory_states<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    func: E::VirtualAddress,
+) -> Option<(Operand<'e>, Operand<'e>)> {
+    struct Analyzer<'acx, 'e, E: ExecutionState<'e>> {
+        /// Branch start addresses for when a Mem8 global is nonzero.
+        flag_set_branches: BumpVec<'acx, (E::VirtualAddress, u64)>,
+        current_flag: Option<u64>,
+        result: Option<(Operand<'e>, Operand<'e>)>,
+        ops_left: u32,
+    }
+
+    impl<'acx, 'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for Analyzer<'acx, 'e, E> {
+        type State = analysis::DefaultState;
+        type Exec = E;
+        fn branch_start(&mut self, ctrl: &mut Control<'e, '_, '_, Self>) {
+            let address = ctrl.address();
+            self.current_flag = self.flag_set_branches.iter()
+                .find(|x| x.0 == address)
+                .map(|x| x.1);
+        }
+
+        fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+            if self.ops_left == 0 {
+                ctrl.end_analysis();
+                return;
+            }
+            self.ops_left -= 1;
+            let ctx = ctrl.ctx();
+            match *op {
+                Operation::Call(..) => {
+                    ctrl.do_call_with_result(ctx.custom(0));
+                }
+                Operation::Jump { condition, to } => {
+                    let condition = ctrl.resolve(condition);
+                    let comparison = match condition.if_arithmetic_eq_neq_zero(ctx) {
+                        Some((x, _)) if x.if_arithmetic_gt().is_some() => x,
+                        _ => condition,
+                    };
+                    if let Some(active_flags) = self.current_flag {
+                        let victory_states = comparison.if_arithmetic_gt_le_const(2)
+                            .and_then(|(x, _)| Operand::and_masked(x).0.if_mem8())
+                            .and_then(|x| x.if_constant_address())
+                            .filter(|&x| x != active_flags);
+                        if let Some(victory_states) = victory_states {
+                            self.result = Some((
+                                ctx.constant(active_flags),
+                                ctx.constant(victory_states),
+                            ));
+                            ctrl.end_analysis();
+                            return;
+                        }
+                    }
+                    let flag_check = condition.if_arithmetic_eq_neq_zero(ctx)
+                        .and_then(|(x, is_eq)| {
+                            let addr = Operand::and_masked(x).0
+                                .if_mem8()?
+                                .if_constant_address()?;
+                            Some((addr, is_eq))
+                        });
+                    if let Some((flag, is_eq)) = flag_check {
+                        let neq_address = match is_eq {
+                            true => Some(ctrl.current_instruction_end()),
+                            false => ctrl.resolve_va(to),
+                        };
+                        if let Some(addr) = neq_address {
+                            self.flag_set_branches.push((addr, flag));
+                        }
+                    }
+                }
+                _ => (),
+            }
+        }
+    }
+
+    let mut analyzer = Analyzer::<E> {
+        flag_set_branches: bumpvec_with_capacity(8, &actx.bump),
+        current_flag: None,
+        result: None,
+        ops_left: 2000,
+    };
+    let mut analysis = FuncAnalysis::new(actx.binary, actx.ctx, func);
+    analysis.analyze(&mut analyzer);
+    analyzer.result
+}
+
+struct StepTriggersStateAnalyzer<'a, 'acx, 'e, E: ExecutionState<'e>> {
+    result: &'a mut StepTriggersState<'e>,
+    trigger_execution_timer: Operand<'e>,
+    game: Operand<'e>,
+    elapsed_ticks: Operand<'e>,
+    inline_depth: u8,
+    next_custom: u32,
+    branch_starts: BumpVec<'acx, (E::VirtualAddress, StepTriggersBranch<'e>)>,
+    current_branch: Option<StepTriggersBranch<'e>>,
+    /// Timer that was decremented in the current branch.
+    last_countdown: Option<Operand<'e>>,
+    leaderboard_candidates: BumpVec<'acx, Operand<'e>>,
+    /// Functions called from step_triggers after player_trigger_lists was seen.
+    calls_after_player_loop: BumpVec<'acx, E::VirtualAddress>,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'a, 'acx, 'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for
+    StepTriggersStateAnalyzer<'a, 'acx, 'e, E>
+{
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn branch_start(&mut self, ctrl: &mut Control<'e, '_, '_, Self>) {
+        let address = ctrl.address();
+        self.current_branch = self.branch_starts.iter().rev()
+            .find(|x| x.0 == address)
+            .map(|x| x.1);
+        self.last_countdown = None;
+    }
+
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        let ctx = ctrl.ctx();
+        match *op {
+            Operation::Call(dest) => {
+                if self.inline_depth == 0 {
+                    if let Some(dest) = ctrl.resolve_va(dest) {
+                        if ctrl.resolve_arg_u32(0) == self.elapsed_ticks {
+                            self.inline_depth = 1;
+                            let old_branch = self.current_branch;
+                            ctrl.analyze_with_current_state(self, dest);
+                            self.current_branch = old_branch;
+                            self.last_countdown = None;
+                            self.inline_depth = 0;
+                            return;
+                        }
+                    }
+                }
+                if self.inline_depth == 0 && self.result.player_trigger_lists.is_some() {
+                    if let Some(dest) = ctrl.resolve_va(dest) {
+                        if !self.calls_after_player_loop.contains(&dest) {
+                            self.calls_after_player_loop.push(dest);
+                        }
+                    }
+                }
+                let custom = ctx.custom(self.next_custom);
+                self.next_custom = self.next_custom.wrapping_add(1);
+                ctrl.do_call_with_result(custom);
+            }
+            Operation::Move(DestOperand::Memory(ref mem), value) => {
+                let dest = ctrl.resolve_mem(mem);
+                let value = ctrl.resolve(value);
+                let dest_op = ctx.memory(&dest);
+                if dest.size == MemAccessSize::Mem32 &&
+                    ctx.sub(dest.address_op(ctx), self.game).if_constant() == Some(0xe608)
+                {
+                    let is_increment = Operand::and_masked(value).0
+                        .if_arithmetic_add_const(1)
+                        .is_some();
+                    if is_increment {
+                        if let Some(StepTriggersBranch::TimerExpired(timer)) =
+                            self.current_branch
+                        {
+                            single_result_assign(
+                                Some(timer),
+                                &mut self.result.trigger_elapsed_time_tick_timer,
+                            );
+                        }
+                    }
+                    return;
+                }
+                if !dest.is_global() {
+                    return;
+                }
+                if dest.size == MemAccessSize::Mem16 {
+                    // The old timer value may have been made undefined by merging
+                    // with a branch that wrote to a neighbouring global.
+                    let is_countdown = Operand::and_masked(value).0
+                        .if_arithmetic_sub_const(1)
+                        .is_some_and(|x| x == dest_op || x.contains_undefined());
+                    if is_countdown {
+                        self.last_countdown = Some(dest_op);
+                    } else if value.if_constant() == Some(0xf) {
+                        let expired = StepTriggersBranch::TimerExpired(dest_op);
+                        if self.current_branch == Some(expired) &&
+                            !self.leaderboard_candidates.contains(&dest_op)
+                        {
+                            self.leaderboard_candidates.push(dest_op);
+                        }
+                    }
+                } else if value.if_constant() == Some(0) {
+                    let expired = StepTriggersBranch::TimerExpired(self.trigger_execution_timer);
+                    if self.current_branch == Some(expired) &&
+                        self.result.player_trigger_victory_states.is_none()
+                    {
+                        if let Some(addr) = dest.if_constant_address() {
+                            self.result.player_trigger_victory_states =
+                                Some(ctx.constant(addr));
+                        }
+                    }
+                }
+            }
+            Operation::Jump { condition, to } => {
+                let condition = ctrl.resolve(condition);
+                if let Some(StepTriggersBranch::FlagSet(flags)) = self.current_branch {
+                    // player_trigger_wait_timers[player] == u32::MAX
+                    let timers = condition.if_arithmetic_eq_neq()
+                        .map(|(l, r, _)| (l, r))
+                        .and_if_either_other(|x| x.if_constant() == Some(0xffff_ffff))
+                        .and_then(|x| x.if_mem32())
+                        .and_then(|x| x.if_constant_address());
+                    let flags = flags.if_memory().and_then(|x| x.if_constant_address());
+                    if let (Some(timers), Some(flags)) = (timers, flags) {
+                        single_result_assign(
+                            Some(ctx.constant(flags)),
+                            &mut self.result.player_trigger_wait_active_flags,
+                        );
+                        single_result_assign(
+                            Some(ctx.constant(timers)),
+                            &mut self.result.player_trigger_wait_timers,
+                        );
+                    }
+                }
+                let Some((x, is_eq)) = condition.if_arithmetic_eq_neq_zero(ctx) else {
+                    return;
+                };
+                let x = Operand::and_masked(x).0;
+                let (eq_address, neq_address) = match is_eq {
+                    true => (ctrl.resolve_va(to), Some(ctrl.current_instruction_end())),
+                    false => (Some(ctrl.current_instruction_end()), ctrl.resolve_va(to)),
+                };
+                if let Some(timer) = self.last_countdown.take() {
+                    let checks_timer = x == timer || x.contains_undefined();
+                    if let (true, Some(addr)) = (checks_timer, eq_address) {
+                        self.branch_starts.push((addr, StepTriggersBranch::TimerExpired(timer)));
+                    }
+                }
+                if let Some(mem) = x.if_mem8() {
+                    if let Some(StepTriggersBranch::FlagSet(flags)) = self.current_branch {
+                        let is_game_victory_state =
+                            ctx.sub(mem.address_op(ctx), self.game).if_constant() ==
+                                Some(0xe610);
+                        if is_game_victory_state {
+                            single_result_assign(
+                                flags.if_memory()
+                                    .and_then(|x| x.if_constant_address())
+                                    .map(|x| ctx.constant(x)),
+                                &mut self.result.player_trigger_active_flags,
+                            );
+                        }
+                    }
+                    if let (Some(_), Some(addr)) = (mem.if_constant_address(), neq_address) {
+                        self.branch_starts.push((addr, StepTriggersBranch::FlagSet(x)));
+                    }
+                }
+                if self.inline_depth == 0 {
+                    // player_trigger_lists[player].count == 0
+                    let word_size = E::VirtualAddress::SIZE as u64;
+                    let lists = ctrl.if_mem_word(x)
+                        .and_then(|mem| {
+                            let (index, offset) = mem.address();
+                            let index = index.if_arithmetic_mul_const(word_size * 3)?;
+                            if index.if_constant().is_some() {
+                                return None;
+                            }
+                            offset.checked_sub(word_size * 2)
+                        });
+                    if let Some(lists) = lists {
+                        single_result_assign(
+                            Some(ctx.constant(lists)),
+                            &mut self.result.player_trigger_lists,
+                        );
+                    }
+                }
+            }
+            _ => (),
         }
     }
 }

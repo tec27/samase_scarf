@@ -1715,7 +1715,8 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 StormTurnLagThreshold | GameTypeTemplates | MatchmakerSessionCount |
                 WorkerAiFreeList | BuildingAiFreeList | AiTownFreeList | AiScriptFreeList |
                 MilitaryAiFreeList | GuardAiFreeList | UnitPositionSearchEntryCount |
-                IsCyclingColorTable =>
+                IsCyclingColorTable | TriggerElapsedTimeTickTimer | LeaderboardRefreshTimer |
+                AiExpansionPlayerCursor =>
             {
                 check_global_opt(result, binary, op.name());
             }
@@ -1737,7 +1738,8 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 LocalSelection | SelectionHotkeyLastUsedFrames |
                 WorkerAiPoolStorage | BuildingAiPoolStorage | AiTownPoolStorage |
                 AiScriptPoolStorage | MilitaryAiPoolStorage | GuardAiPoolStorage |
-                DcreepStatePool =>
+                DcreepStatePool | PlayerTriggerLists | PlayerTriggerWaitActiveFlags |
+                PlayerTriggerWaitTimers | PlayerTriggerVictoryStates | PlayerTriggerActiveFlags =>
             {
                 check_global_struct_opt(result, binary, op.name());
             }
