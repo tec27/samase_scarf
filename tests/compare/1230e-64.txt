@@ -59,6 +59,7 @@ choose_snp: 1403563e0
 clamp_zoom: 1402111e0
 clear_build_queue: 140190d90
 clear_render_target: 1405e5c60
+clear_transient_sprite_state_for_save: 1401834a0
 clip_cursor: 14033c750
 command_lobby_map_p2p: 1402c6020
 config_vsync_value: 1403d6c00
@@ -233,6 +234,7 @@ rand_synced: 14036a7e0
 randomize_player_colors: None
 read_whole_mpq_file: 14056cd70
 read_whole_mpq_file2: 14056cdb0
+rebuild_selection_visuals_after_save: 140183570
 receive_storm_turns: 14034ec90
 recompute_turn_durations: 1402f75f0
 record_turn_sync_slot: 140370d10
