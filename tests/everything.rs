@@ -1682,8 +1682,8 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 DialogReturnCode | AssetScale | ImagesLoaded | VisionUpdateCounter |
                 VisionUpdated | FirstDyingUnit | FirstRevealer | FirstInvisibleUnit |
                 ActiveIscriptFlingy | ActiveIscriptBullet | UnitShouldRevealArea |
-                NetworkReady | LastBulletSpawner | ActiveBulletCount |
-                DatRequirementError | CursorMarker |
+                NetworkReady | LastBulletSpawner | LastBulletSpinDirection |
+                ActiveBulletCount | DatRequirementError | CursorMarker |
                 SyncActive | IscriptBin | StormCommandUser | FirstFreeOrder | LastFreeOrder |
                 AllocatedOrderCount | ContinueGameLoop | StepGameFrames | ReplaySeekFrame |
                 NextGameStepTick | FirstPylon | PylonRefresh | PylonAurasVisible |
