@@ -247,6 +247,14 @@ results! {
         DeserializeSprites => deserialize_sprites => cache_sprite_serialization,
         SerializeImages => serialize_images => cache_image_serialization,
         DoSave => do_save => cache_image_serialization,
+        // Called by do_save before serializing images/sprites; clears selection circle
+        // and health bar state from every sprite.
+        ClearTransientSpriteStateForSave => clear_transient_sprite_state_for_save =>
+            cache_save_selection_visuals,
+        // Called by do_save after serializing game objects; recreates selection circles
+        // of local_selection and teammates' shared selections.
+        RebuildSelectionVisualsAfterSave => rebuild_selection_visuals_after_save =>
+            cache_save_selection_visuals,
         FontCacheRenderAscii => font_cache_render_ascii => cache_font_render,
         TtfCacheCharacter => ttf_cache_character => cache_font_render,
         TtfRenderSdf => ttf_render_sdf => cache_font_render,
@@ -3402,6 +3410,34 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
             );
             Some(([result.serialize_images, result.do_save], []))
         })
+    }
+
+    fn cache_save_selection_visuals(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        self.cache_many(
+            &[ClearTransientSpriteStateForSave, RebuildSelectionVisualsAfterSave],
+            &[],
+            |s| {
+                let do_save = s.cache_many_addr(DoSave, |s| s.cache_image_serialization(actx))?;
+                let serialize_images =
+                    s.cache_many_addr(SerializeImages, |s| s.cache_image_serialization(actx))?;
+                let serialize_sprites = s.serialize_sprites(actx)?;
+                let sprite_array = s.sprite_array(actx)?.0;
+                let local_selection = s.cache_many_op(
+                    OperandAnalysis::LocalSelection,
+                    |s| s.cache_local_selection(actx),
+                )?;
+                let result = save::save_selection_visuals(
+                    actx,
+                    do_save,
+                    serialize_images,
+                    serialize_sprites,
+                    sprite_array,
+                    local_selection,
+                );
+                Some(([result.clear_transient_sprite_state_for_save,
+                    result.rebuild_selection_visuals_after_save], []))
+            })
     }
 
     fn limits(&mut self, actx: &AnalysisCtx<'e, E>) -> Rc<Limits<'e, E::VirtualAddress>> {
