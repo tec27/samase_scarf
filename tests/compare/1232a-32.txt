@@ -133,6 +133,7 @@ get_local_storm_session_player: None
 get_locales: None
 get_mouse_x: 006aab90
 get_mouse_y: 006aaba0
+get_observer_ui: 0061eaa0
 get_outstanding_turn_count: 00930a50
 get_player_color: 0058f800
 get_player_force_color: 0074dec0
@@ -202,6 +203,10 @@ move_sprite: 00577430
 move_unit: 005d12e0
 net_format_turn_rate: 007350d0
 net_player_count: 00742bb0
+observer_ui_finish_research_or_upgrade: 0061e6e0
+observer_ui_remove_building_unit_record: 0061e640
+observer_ui_track_building_unit: 0061df00
+observer_ui_track_research_or_upgrade: 0061e0d0
 open_anim_multi_file: 0052da40
 open_anim_single_file: 0052d4d0
 open_file: 00541be0
