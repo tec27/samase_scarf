@@ -771,6 +771,9 @@ results! {
         FirstFreeBullet => first_free_bullet => cache_bullet_creation,
         LastFreeBullet => last_free_bullet => cache_bullet_creation,
         ActiveIscriptUnit => active_iscript_unit => cache_bullet_creation,
+        // u32, number of bullets in the active list; create_bullet refuses to create
+        // more than the limit.
+        ActiveBulletCount => active_bullet_count => cache_bullet_creation,
         UniqueCommandUser => unique_command_user => cache_selections,
         Selections => selections => cache_selections,
         // Unit *[selection_limit] of what the local player has selected on screen; laid out
@@ -3227,11 +3230,12 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
         use OperandAnalysis::*;
         self.cache_many(&[AddressAnalysis::CreateBullet], &[
             FirstActiveBullet, LastActiveBullet, FirstFreeBullet, LastFreeBullet,
-            ActiveIscriptUnit,
+            ActiveIscriptUnit, ActiveBulletCount,
         ], |s| {
             let result = bullets::bullet_creation(actx, s.step_iscript_switch(actx)?);
             Some(([result.create_bullet], [result.first_active_bullet, result.last_active_bullet,
-                result.first_free_bullet, result.last_free_bullet, result.active_iscript_unit]))
+                result.first_free_bullet, result.last_free_bullet, result.active_iscript_unit,
+                result.active_bullet_count]))
         })
     }
 

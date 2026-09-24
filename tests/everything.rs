@@ -1683,7 +1683,7 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 VisionUpdated | FirstDyingUnit | FirstRevealer | FirstInvisibleUnit |
                 ActiveIscriptFlingy | ActiveIscriptBullet | UnitShouldRevealArea |
                 NetworkReady | LastBulletSpawner | LastBulletSpinDirection |
-                DatRequirementError | CursorMarker |
+                ActiveBulletCount | DatRequirementError | CursorMarker |
                 SyncActive | IscriptBin | StormCommandUser | FirstFreeOrder | LastFreeOrder |
                 AllocatedOrderCount | ContinueGameLoop | StepGameFrames | ReplaySeekFrame |
                 NextGameStepTick | FirstPylon | PylonRefresh | PylonAurasVisible |
