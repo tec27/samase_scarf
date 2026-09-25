@@ -687,6 +687,11 @@ results! {
         EngineFree => engine_free => cache_engine_alloc_funcs,
         // Writes one slot of the sync_data ring; called once per turn by step_network.
         RecordTurnSyncSlot => record_turn_sync_slot => cache_turn_sync_checks,
+        // (sprite) -> u16; decodes the sprite_x / sprite_y encoded position of the sprite.
+        // Not found on builds that store the position unencoded (before 1.23.3c); those
+        // read the sprite fields directly.
+        GetSpriteX => get_sprite_x => cache_sprite_position_funcs,
+        GetSpriteY => get_sprite_y => cache_sprite_position_funcs,
     }
 }
 
@@ -3217,6 +3222,31 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
 
     fn draw_image(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<E::VirtualAddress> {
         self.cache_many_addr(AddressAnalysis::DrawImage, |s| s.cache_draw_game_layer(actx))
+    }
+
+    fn prepare_draw_image(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<E::VirtualAddress> {
+        self.cache_many_addr(
+            AddressAnalysis::PrepareDrawImage,
+            |s| s.cache_draw_game_layer(actx),
+        )
+    }
+
+    fn cache_sprite_position_funcs(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        self.cache_many(&[GetSpriteX, GetSpriteY], &[], |s| {
+            // Caches sprite_x_position / sprite_y_position
+            s.sprite_hlines_end(actx);
+            let x_position = s.sprite_x_position?;
+            let y_position = s.sprite_y_position?;
+            let prepare_draw_image = s.prepare_draw_image(actx)?;
+            let result = sprites::sprite_position_funcs(
+                actx,
+                prepare_draw_image,
+                x_position,
+                y_position,
+            );
+            Some(([result.get_sprite_x, result.get_sprite_y], []))
+        })
     }
 
     fn update_game_screen_size(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<E::VirtualAddress> {

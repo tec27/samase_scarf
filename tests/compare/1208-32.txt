@@ -141,6 +141,8 @@ get_player_force_color: 007d1e70
 get_region: 007e3bb0
 get_render_target: 009fe030
 get_sight_range: 00685470
+get_sprite_x: None
+get_sprite_y: None
 get_statres_icons_ddsgrp: None
 get_target_acquisition_range: 0067e9e0
 get_ui_consoles: None
