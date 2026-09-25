@@ -191,10 +191,6 @@ results! {
         // formatting. The second argument is a display time in milliseconds, most callers
         // pass 0.
         ShowGameMessage => show_game_message => cache_show_game_message,
-        // (list); resets a `{ next, prev, count }` list header to empty and frees every
-        // node of the list through the engine allocator.
-        // Not found on builds that inline it in trigger code (all 32-bit builds and most
-        // 64-bit builds before 1.23.10).
         StepOrder => step_order,
         PrepareDrawImage => prepare_draw_image => cache_draw_game_layer,
         DrawImage => draw_image => cache_draw_game_layer,
