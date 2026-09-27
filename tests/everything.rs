@@ -1633,7 +1633,7 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 RandomizePlayerColors | NetPlayerCount | StormJoinGame |
                 StormSessionPlayerLookupOrCreate | GetLocalStormSessionPlayer |
                 StormRegisterSlotName | FindStormSessionPlayer | SnetDrainDeferredQueue |
-                RecordTurnSyncSlot =>
+                RecordTurnSyncSlot | SetSpriteSelectionFlashTimer =>
                     continue,
             _ => (),
         }

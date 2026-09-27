@@ -2991,3 +2991,197 @@ fn is_stack_memory<'e, Va: VirtualAddress>(mem: &MemAccess<'e>, ctx: OperandCtx<
         false
     }
 }
+
+pub(crate) struct RclickFeedback<Va: VirtualAddress> {
+    pub show_cursor_marker_at: Option<Va>,
+    pub set_sprite_selection_flash_timer: Option<Va>,
+}
+
+pub(crate) fn rclick_feedback<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    game_screen_rclick: E::VirtualAddress,
+    draw_cursor_marker: Operand<'e>,
+) -> RclickFeedback<E::VirtualAddress> {
+    // game_screen_rclick shows feedback for where the click landed:
+    //  if fow_sprite != null {
+    //      set_sprite_selection_flash_timer(fow_sprite, 0x1f);
+    //  } else if unit == null {
+    //      show_cursor_marker_at(x, y);
+    //  } else {
+    //      set_sprite_selection_flash_timer(unit, 0x1f);
+    //  }
+    // The flash function is recognized from the 0x1f argument and storing its second argument
+    // to arg1.sprite.selection_flash_timer, show_cursor_marker_at from storing 1 to
+    // draw_cursor_marker.
+    // Builds before 1.21.2 do this in a helper function called by game_screen_rclick,
+    // with the flash timer writes inlined, so show_cursor_marker_at is searched one call
+    // deeper if game_screen_rclick doesn't call it directly.
+    let bump = &actx.bump;
+    let mut result = RclickFeedback {
+        show_cursor_marker_at: None,
+        set_sprite_selection_flash_timer: None,
+    };
+    let callees = collect_callees(actx, game_screen_rclick, Some(&mut result));
+    let flash = result.set_sprite_selection_flash_timer;
+    result.show_cursor_marker_at = callees.iter()
+        .copied()
+        .filter(|&f| Some(f) != flash)
+        .find(|&f| does_show_cursor_marker(actx, f, draw_cursor_marker));
+    if result.show_cursor_marker_at.is_none() {
+        let mut checked = BumpVec::from_iter_in(callees.iter().copied(), bump);
+        'outer: for &func in callees.iter() {
+            if Some(func) == flash {
+                continue;
+            }
+            for inner in collect_callees(actx, func, None) {
+                if checked.contains(&inner) {
+                    continue;
+                }
+                checked.push(inner);
+                if does_show_cursor_marker(actx, inner, draw_cursor_marker) {
+                    result.show_cursor_marker_at = Some(inner);
+                    break 'outer;
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Returns functions that `func` calls, without duplicates. If `flash` is set, also checks
+/// calls with a 0x1f timer argument for set_sprite_selection_flash_timer.
+fn collect_callees<'acx, 'e, E: ExecutionState<'e>>(
+    actx: &'acx AnalysisCtx<'e, E>,
+    func: E::VirtualAddress,
+    flash: Option<&mut RclickFeedback<E::VirtualAddress>>,
+) -> BumpVec<'acx, E::VirtualAddress> {
+    struct Analyzer<'a, 'acx, 'e, E: ExecutionState<'e>> {
+        flash: Option<&'a mut RclickFeedback<E::VirtualAddress>>,
+        actx: &'acx AnalysisCtx<'e, E>,
+        callees: BumpVec<'acx, E::VirtualAddress>,
+    }
+
+    impl<'a, 'acx, 'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for Analyzer<'a, 'acx, 'e, E> {
+        type State = analysis::DefaultState;
+        type Exec = E;
+        fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+            if let Operation::Call(dest) = *op {
+                let Some(dest) = ctrl.resolve_va(dest) else { return };
+                if self.callees.contains(&dest) {
+                    return;
+                }
+                self.callees.push(dest);
+                if let Some(ref mut result) = self.flash {
+                    // Thiscall on 32-bit, but accept a stack-passed `this` too.
+                    let is_flash_call = result.set_sprite_selection_flash_timer.is_none() &&
+                        (ctrl.resolve_arg_thiscall_u8(0).if_constant() == Some(0x1f) ||
+                            ctrl.resolve_arg_u8(1).if_constant() == Some(0x1f));
+                    if is_flash_call && is_set_sprite_selection_flash_timer(self.actx, dest) {
+                        result.set_sprite_selection_flash_timer = Some(dest);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut analyzer = Analyzer::<E> {
+        flash,
+        actx,
+        callees: bumpvec_with_capacity(0x20, &actx.bump),
+    };
+    let mut analysis = FuncAnalysis::new(actx.binary, actx.ctx, func);
+    analysis.analyze(&mut analyzer);
+    analyzer.callees
+}
+
+/// Checks that `func` stores its u8 timer argument to `arg1.sprite.selection_flash_timer`.
+/// `arg1` may be passed as `this` or as the first stack argument.
+fn is_set_sprite_selection_flash_timer<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    func: E::VirtualAddress,
+) -> bool {
+    struct Analyzer<'a, 'e, E: ExecutionState<'e>> {
+        result: bool,
+        arg_cache: &'a ArgCache<'e, E>,
+    }
+
+    impl<'a, 'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for Analyzer<'a, 'e, E> {
+        type State = analysis::DefaultState;
+        type Exec = E;
+        fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+            if let Operation::Move(DestOperand::Memory(ref mem), value) = *op {
+                if mem.size != MemAccessSize::Mem8 {
+                    return;
+                }
+                let ctx = ctrl.ctx();
+                let dest = ctrl.resolve_mem(mem);
+                let layouts = E::struct_layouts();
+                let Some(sprite) = dest.if_offset(layouts.sprite_selection_flash_timer())
+                    else { return };
+                let Some(this) = layouts.if_unit_sprite(sprite) else { return };
+                let value = ctx.and_const(ctrl.resolve(value), 0xff);
+                let ok = if this == ctx.register(1) {
+                    value == ctx.and_const(self.arg_cache.on_thiscall_entry(0), 0xff)
+                } else if this == self.arg_cache.on_entry(0) {
+                    value == ctx.and_const(self.arg_cache.on_entry(1), 0xff)
+                } else {
+                    false
+                };
+                if ok {
+                    self.result = true;
+                    ctrl.end_analysis();
+                }
+            }
+        }
+    }
+
+    let mut analyzer = Analyzer::<E> {
+        result: false,
+        arg_cache: &actx.arg_cache,
+    };
+    let mut analysis = FuncAnalysis::new(actx.binary, actx.ctx, func);
+    analysis.analyze(&mut analyzer);
+    analyzer.result
+}
+
+/// Checks that `func` stores 1 to `draw_cursor_marker`.
+fn does_show_cursor_marker<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    func: E::VirtualAddress,
+    draw_cursor_marker: Operand<'e>,
+) -> bool {
+    struct Analyzer<'e, E: ExecutionState<'e>> {
+        result: bool,
+        draw_cursor_marker: Operand<'e>,
+        phantom: std::marker::PhantomData<E>,
+    }
+
+    impl<'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for Analyzer<'e, E> {
+        type State = analysis::DefaultState;
+        type Exec = E;
+        fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+            if let Operation::Move(DestOperand::Memory(ref mem), value) = *op {
+                if mem.size != MemAccessSize::Mem8 {
+                    return;
+                }
+                if ctrl.resolve(value).if_constant() != Some(1) {
+                    return;
+                }
+                let dest = ctrl.resolve_mem(mem);
+                if ctrl.ctx().memory(&dest) == self.draw_cursor_marker {
+                    self.result = true;
+                    ctrl.end_analysis();
+                }
+            }
+        }
+    }
+
+    let mut analyzer = Analyzer::<E> {
+        result: false,
+        draw_cursor_marker,
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(actx.binary, actx.ctx, func);
+    analysis.analyze(&mut analyzer);
+    analyzer.result
+}
