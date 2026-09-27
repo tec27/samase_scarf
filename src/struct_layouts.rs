@@ -49,6 +49,10 @@ impl StructLayouts {
         self.pair(0xe, 0x16)
     }
 
+    pub const fn sprite_selection_flash_timer(self) -> u64 {
+        self.pair(0xf, 0x17)
+    }
+
     pub const fn unit_sprite(self) -> u64 {
         self.pair(0xc, 0x18)
     }

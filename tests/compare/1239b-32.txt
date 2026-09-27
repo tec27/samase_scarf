@@ -265,11 +265,13 @@ set_briefing_music: 006ef3e0
 set_current_cursor_type: 006871e0
 set_music: 00781d10
 set_scmain_state: 00706750
+set_sprite_selection_flash_timer: 005776e0
 set_unit_player: 005a2d20
 sfile_close_archive: 00935b50
 sfile_close_file: 00935d50
 sfile_open_file_ex: 00937190
 sfile_read_file_ex: 00937560
+show_cursor_marker_at: 00576130
 show_finished_unit_notification: 006ded90
 show_game_message: 0070fc10
 show_info_message_with_sound: 006dd9d0

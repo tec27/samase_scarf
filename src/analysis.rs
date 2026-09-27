@@ -683,6 +683,15 @@ results! {
         EngineFree => engine_free => cache_engine_alloc_funcs,
         // Writes one slot of the sync_data ring; called once per turn by step_network.
         RecordTurnSyncSlot => record_turn_sync_slot => cache_turn_sync_checks,
+        // (x: i16, y: i16); moves the right-click cursor marker sprite to the map point
+        // and restarts its animation. Called by the ui on right clicks on ground.
+        ShowCursorMarkerAt => show_cursor_marker_at => cache_rclick_feedback,
+        // (unit_or_fow_sprite, timer: u8); sets `obj.sprite.selection_flash_timer`, which
+        // makes the selection circle of a right-click target blink. The ui calls this for
+        // right click targets, and the transmission trigger action calls it during game
+        // logic. Not found on builds before 1.22.1, which inline it.
+        SetSpriteSelectionFlashTimer => set_sprite_selection_flash_timer =>
+            cache_rclick_feedback,
     }
 }
 
@@ -2726,6 +2735,17 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
             AddressAnalysis::GameScreenRClick,
             |s| s.cache_game_screen_rclick(actx),
         )
+    }
+
+    fn cache_rclick_feedback(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        self.cache_many(&[ShowCursorMarkerAt, SetSpriteSelectionFlashTimer], &[], |s| {
+            let game_screen_rclick = s.game_screen_rclick(actx)?;
+            let draw_cursor_marker = s.draw_cursor_marker(actx)?;
+            let result =
+                clientside::rclick_feedback(actx, game_screen_rclick, draw_cursor_marker);
+            Some(([result.show_cursor_marker_at, result.set_sprite_selection_flash_timer], []))
+        })
     }
 
     fn cache_select_map_entry(&mut self, actx: &AnalysisCtx<'e, E>) {
