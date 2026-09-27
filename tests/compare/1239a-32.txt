@@ -210,8 +210,10 @@ observer_ui_track_building_unit: 00627c50
 observer_ui_track_research_or_upgrade: 00627e20
 open_anim_multi_file: 00531d40
 open_anim_single_file: 00531750
+open_defeat_mission_dialog: 00669c40
 open_file: 00546370
 open_map_mpq: 00934ed0
+open_victory_mission_dialog: 00669e30
 order_init_arbiter: 005bf740
 pick_auto_target: 005c1dd0
 pick_random_target: 005c1cd0
@@ -664,6 +666,7 @@ tranwire_grp: Mem32[11eb378]
 trigger_current_player: Mem32[11f24cc]
 trigger_elapsed_time_tick_timer: Mem16[11f2534]
 trigger_execution_timer: Mem16[11f24c8]
+trigger_result_check_timer: Mem16[11f2538]
 turn_duration_by_speed: 11b119c
 turn_timer_accumulator: Mem32[11b11b8]
 ui_consoles: 11ebe74

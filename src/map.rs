@@ -885,8 +885,8 @@ impl<'a, 'acx, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for
     }
 }
 
-#[derive(Clone, Copy, Default)]
-pub(crate) struct StepTriggersState<'e> {
+#[derive(Clone, Copy)]
+pub(crate) struct StepTriggersState<'e, Va: VirtualAddress> {
     pub player_trigger_lists: Option<Operand<'e>>,
     pub trigger_elapsed_time_tick_timer: Option<Operand<'e>>,
     pub leaderboard_refresh_timer: Option<Operand<'e>>,
@@ -894,6 +894,33 @@ pub(crate) struct StepTriggersState<'e> {
     pub player_trigger_wait_timers: Option<Operand<'e>>,
     pub player_trigger_victory_states: Option<Operand<'e>>,
     pub player_trigger_active_flags: Option<Operand<'e>>,
+    pub trigger_result_check_timer: Option<Operand<'e>>,
+    pub open_defeat_mission_dialog: Option<Va>,
+    pub open_victory_mission_dialog: Option<Va>,
+}
+
+impl<'e, Va: VirtualAddress> Default for StepTriggersState<'e, Va> {
+    fn default() -> Self {
+        StepTriggersState {
+            player_trigger_lists: None,
+            trigger_elapsed_time_tick_timer: None,
+            leaderboard_refresh_timer: None,
+            player_trigger_wait_active_flags: None,
+            player_trigger_wait_timers: None,
+            player_trigger_victory_states: None,
+            player_trigger_active_flags: None,
+            trigger_result_check_timer: None,
+            open_defeat_mission_dialog: None,
+            open_victory_mission_dialog: None,
+        }
+    }
+}
+
+/// Mission result dialog that step_triggers opens for a local victory state.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum MissionDialog {
+    Defeat,
+    Victory,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -924,12 +951,17 @@ enum StepTriggersBranch<'e> {
 ///   see `trigger_flags_from_update_victory_states`.
 /// - player_trigger_lists[player].count is compared against 0 for the current trigger
 ///   player; the list header is `{ next, prev, count }`, three words.
+/// - trigger_result_check_timer: the countdown that is reloaded with 0x2d when it expires.
+///   Its expiration branch then checks the local player's victory state
+///   (game + 0xe610 + local_player_id) and calls open_defeat_mission_dialog when it is 2
+///   and open_victory_mission_dialog when it is 3 or 5.
 pub(crate) fn step_triggers_state<'e, E: ExecutionState<'e>>(
     actx: &AnalysisCtx<'e, E>,
     step_triggers: E::VirtualAddress,
     trigger_execution_timer: Operand<'e>,
     game: Operand<'e>,
-) -> StepTriggersState<'e> {
+    local_player_id: Option<Operand<'e>>,
+) -> StepTriggersState<'e, E::VirtualAddress> {
     let binary = actx.binary;
     let ctx = actx.ctx;
     let bump = &actx.bump;
@@ -938,6 +970,9 @@ pub(crate) fn step_triggers_state<'e, E: ExecutionState<'e>>(
         result: &mut result,
         trigger_execution_timer,
         game,
+        local_player_id,
+        mission_dialog_branches: bumpvec_with_capacity(4, bump),
+        current_mission_dialog: None,
         elapsed_ticks: ctx.and_const(actx.arg_cache.on_entry(0), 0xffff_ffff),
         inline_depth: 0,
         next_custom: 0,
@@ -946,7 +981,6 @@ pub(crate) fn step_triggers_state<'e, E: ExecutionState<'e>>(
         last_countdown: None,
         leaderboard_candidates: bumpvec_with_capacity(4, bump),
         calls_after_player_loop: bumpvec_with_capacity(8, bump),
-        phantom: Default::default(),
     };
     let mut analysis = FuncAnalysis::new(binary, ctx, step_triggers);
     analysis.analyze(&mut analyzer);
@@ -1076,9 +1110,15 @@ fn trigger_flags_from_update_victory_states<'e, E: ExecutionState<'e>>(
 }
 
 struct StepTriggersStateAnalyzer<'a, 'acx, 'e, E: ExecutionState<'e>> {
-    result: &'a mut StepTriggersState<'e>,
+    result: &'a mut StepTriggersState<'e, E::VirtualAddress>,
     trigger_execution_timer: Operand<'e>,
     game: Operand<'e>,
+    local_player_id: Option<Operand<'e>>,
+    /// Branch start addresses taken when the local player's victory state selects a mission
+    /// dialog.
+    mission_dialog_branches: BumpVec<'acx, (E::VirtualAddress, MissionDialog)>,
+    /// The mission dialog whose opener the current branch calls first.
+    current_mission_dialog: Option<MissionDialog>,
     elapsed_ticks: Operand<'e>,
     inline_depth: u8,
     next_custom: u32,
@@ -1089,7 +1129,59 @@ struct StepTriggersStateAnalyzer<'a, 'acx, 'e, E: ExecutionState<'e>> {
     leaderboard_candidates: BumpVec<'acx, Operand<'e>>,
     /// Functions called from step_triggers after player_trigger_lists was seen.
     calls_after_player_loop: BumpVec<'acx, E::VirtualAddress>,
-    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'a, 'acx, 'e, E: ExecutionState<'e>> StepTriggersStateAnalyzer<'a, 'acx, 'e, E> {
+    /// Notes the branch a jump takes when the local player's victory state
+    /// (game + 0xe610 + local_player_id) equals 2 (defeat) or 3 / 5 (victory). The states
+    /// can be compared one after another by subtracting from the same register, in which
+    /// case the compared operand is `state - k`.
+    fn check_mission_dialog_jump(
+        &mut self,
+        ctrl: &mut Control<'e, '_, '_, Self>,
+        condition: Operand<'e>,
+        to: Operand<'e>,
+    ) {
+        let ctx = ctrl.ctx();
+        let Some(local_player_id) = self.local_player_id else {
+            return;
+        };
+        let Some((left, right, is_eq)) = condition.if_arithmetic_eq_neq() else {
+            return;
+        };
+        let Some(compared) = right.if_constant() else {
+            return;
+        };
+        let left = Operand::and_masked(left).0;
+        let (state, value) = match left.if_arithmetic_sub()
+            .and_then(|(x, k)| Some((x, k.if_constant()?)))
+        {
+            Some((x, k)) => (Operand::and_masked(x).0, compared.wrapping_add(k)),
+            None => (left, compared),
+        };
+        let Some(mem) = state.if_mem8() else {
+            return;
+        };
+        let index = ctx.sub(mem.address_op(ctx), self.game);
+        let local_player_id = Operand::and_masked(local_player_id).0;
+        let is_local_victory_state = index.if_arithmetic_add_const(0xe610)
+            .is_some_and(|x| Operand::and_masked(x).0 == local_player_id);
+        if !is_local_victory_state {
+            return;
+        }
+        let dialog = match value {
+            2 => MissionDialog::Defeat,
+            3 | 5 => MissionDialog::Victory,
+            _ => return,
+        };
+        let eq_address = match is_eq {
+            true => ctrl.resolve_va(to),
+            false => Some(ctrl.current_instruction_end()),
+        };
+        if let Some(address) = eq_address {
+            self.mission_dialog_branches.push((address, dialog));
+        }
+    }
 }
 
 impl<'a, 'acx, 'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for
@@ -1102,6 +1194,9 @@ impl<'a, 'acx, 'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for
         self.current_branch = self.branch_starts.iter().rev()
             .find(|x| x.0 == address)
             .map(|x| x.1);
+        self.current_mission_dialog = self.mission_dialog_branches.iter()
+            .find(|x| x.0 == address)
+            .map(|x| x.1);
         self.last_countdown = None;
     }
 
@@ -1109,6 +1204,13 @@ impl<'a, 'acx, 'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for
         let ctx = ctrl.ctx();
         match *op {
             Operation::Call(dest) => {
+                if let Some(dialog) = self.current_mission_dialog.take() {
+                    let opener = match dialog {
+                        MissionDialog::Defeat => &mut self.result.open_defeat_mission_dialog,
+                        MissionDialog::Victory => &mut self.result.open_victory_mission_dialog,
+                    };
+                    single_result_assign(ctrl.resolve_va(dest), opener);
+                }
                 if self.inline_depth == 0 {
                     if let Some(dest) = ctrl.resolve_va(dest) {
                         if ctrl.resolve_arg_u32(0) == self.elapsed_ticks {
@@ -1166,6 +1268,14 @@ impl<'a, 'acx, 'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for
                         .is_some_and(|x| x == dest_op || x.contains_undefined());
                     if is_countdown {
                         self.last_countdown = Some(dest_op);
+                    } else if value.if_constant() == Some(0x2d) {
+                        let expired = StepTriggersBranch::TimerExpired(dest_op);
+                        if self.current_branch == Some(expired) {
+                            single_result_assign(
+                                Some(dest_op),
+                                &mut self.result.trigger_result_check_timer,
+                            );
+                        }
                     } else if value.if_constant() == Some(0xf) {
                         let expired = StepTriggersBranch::TimerExpired(dest_op);
                         if self.current_branch == Some(expired) &&
@@ -1188,6 +1298,9 @@ impl<'a, 'acx, 'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for
             }
             Operation::Jump { condition, to } => {
                 let condition = ctrl.resolve(condition);
+                if self.result.trigger_result_check_timer.is_some() {
+                    self.check_mission_dialog_jump(ctrl, condition, to);
+                }
                 if let Some(StepTriggersBranch::FlagSet(flags)) = self.current_branch {
                     // player_trigger_wait_timers[player] == u32::MAX
                     let timers = condition.if_arithmetic_eq_neq()

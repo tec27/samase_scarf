@@ -692,6 +692,14 @@ results! {
         // logic. Not found on builds before 1.22.1, which inline it.
         SetSpriteSelectionFlashTimer => set_sprite_selection_flash_timer =>
             cache_rclick_feedback,
+        // () -> (); opens the defeat dialog (lmission). Called from step_triggers every
+        // time trigger_result_check_timer expires while the local player's victory state is 2.
+        // Not found on builds before 1.21.2.
+        OpenDefeatMissionDialog => open_defeat_mission_dialog => cache_step_triggers_state,
+        // () -> (); opens the victory dialog (wmission). Called from step_triggers every
+        // time trigger_result_check_timer expires while the local player's victory state is
+        // 3 or 5, and for observers once every player that runs triggers has a victory state.
+        OpenVictoryMissionDialog => open_victory_mission_dialog => cache_step_triggers_state,
     }
 }
 
@@ -934,6 +942,10 @@ results! {
             cache_step_triggers_state,
         // u8[8], nonzero for players that run triggers.
         PlayerTriggerActiveFlags => player_trigger_active_flags => cache_step_triggers_state,
+        // u16 countdown of frames until the local player's victory state is checked for
+        // opening the mission result dialog; reset to 0x2d. Not counted down in replays.
+        // Not found on builds before 1.21.2.
+        TriggerResultCheckTimer => trigger_result_check_timer => cache_step_triggers_state,
         // Game screen size in "BW pixels"
         //      - 1:1 with actual pixels in SD 640x480, and the coordinates used by gameplay logic.
         // Affected by zoom: zooming out => more pixels shown on screen => w/h grow
@@ -4119,12 +4131,13 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
     }
 
     fn cache_step_triggers_state(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
         use OperandAnalysis::*;
         self.cache_many(
-            &[],
+            &[OpenDefeatMissionDialog, OpenVictoryMissionDialog],
             &[PlayerTriggerLists, TriggerElapsedTimeTickTimer, LeaderboardRefreshTimer,
                 PlayerTriggerWaitActiveFlags, PlayerTriggerWaitTimers,
-                PlayerTriggerVictoryStates, PlayerTriggerActiveFlags],
+                PlayerTriggerVictoryStates, PlayerTriggerActiveFlags, TriggerResultCheckTimer],
             |s| {
                 let step_triggers = s.run_triggers(actx).step_triggers?;
                 let trigger_execution_timer = s.cache_many_op(
@@ -4132,16 +4145,23 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
                     |s| s.cache_trigger_execution_timer(actx),
                 )?;
                 let game = s.game(actx)?;
+                // Only the mission dialog openers need it, so the rest are still found
+                // without it.
+                let local_player_id = s.local_player_id(actx);
                 let r = map::step_triggers_state(
                     actx,
                     step_triggers,
                     trigger_execution_timer,
                     game,
+                    local_player_id,
                 );
-                Some(([], [r.player_trigger_lists, r.trigger_elapsed_time_tick_timer,
-                    r.leaderboard_refresh_timer, r.player_trigger_wait_active_flags,
-                    r.player_trigger_wait_timers, r.player_trigger_victory_states,
-                    r.player_trigger_active_flags]))
+                Some((
+                    [r.open_defeat_mission_dialog, r.open_victory_mission_dialog],
+                    [r.player_trigger_lists, r.trigger_elapsed_time_tick_timer,
+                        r.leaderboard_refresh_timer, r.player_trigger_wait_active_flags,
+                        r.player_trigger_wait_timers, r.player_trigger_victory_states,
+                        r.player_trigger_active_flags, r.trigger_result_check_timer],
+                ))
             })
     }
 

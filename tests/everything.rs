@@ -1635,6 +1635,8 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 StormRegisterSlotName | FindStormSessionPlayer | SnetDrainDeferredQueue |
                 RecordTurnSyncSlot | SetSpriteSelectionFlashTimer =>
                     continue,
+            OpenDefeatMissionDialog | OpenVictoryMissionDialog
+                if version < (1, 21, 2, b'a') => continue,
             _ => (),
         }
         assert!(result.is_some(), "Missing {}", addr.name());
@@ -1720,6 +1722,11 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 AiExpansionPlayerCursor =>
             {
                 check_global_opt(result, binary, op.name());
+            }
+            TriggerResultCheckTimer => {
+                if result.is_some() || version >= (1, 21, 2, b'a') {
+                    check_global_opt(result, binary, op.name());
+                }
             }
             LocalPlayerName | FirstGuardAi | PlayerAiTowns | PlayerAi | Campaigns | Fonts |
                 UnitStrength | WireframDdsgrp | ChkInitPlayers | OriginalChkPlayerTypes |
