@@ -574,6 +574,7 @@ outgoing_command_length: Mem32[1062b04]
 palette_set: 1091de0
 path_array: Mem32[1071488]
 pathing: Mem32[1067f8c]
+pathing_ignored_unit: Mem32[1071490]
 pending_leave_reason: 10639bc
 placement_images: e616d8
 placement_rects: e626e0

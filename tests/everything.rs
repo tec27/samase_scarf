@@ -1708,6 +1708,7 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 OrderTimerResetCounter | SecondaryOrderTimerResetCounter | StepAiRegionsRegion |
                 StepAiRegionsPlayer | AiTargetIgnoreResetCounter | AiTargetIgnoreResetCounter2 |
                 AiTargetIgnoreRequestReset | AiMilitaryUpdateCounter | PathArray | FirstFreePath |
+                PathingIgnoredUnit |
                 LastActiveUnit | FirstFreeHpBar | LastFreeHpBar |
                 FirstFreePlacementImage | LastFreePlacementImage | FirstFreePlacementRect |
                 LastFreePlacementRect | TilesetIndexedMapTiles | Vx4MapTiles | RepulseState |
