@@ -11,7 +11,8 @@ use crate::call_tracker::CallTracker;
 use crate::switch::simple_switch_branch;
 use crate::switch::CompleteSwitch;
 use crate::util::{
-    ControlExt, ExecStateExt, OperandExt, OptionExt, bumpvec_with_capacity, single_result_assign,
+    ControlExt, ExecStateExt, MemAccessExt, OperandExt, OptionExt, bumpvec_with_capacity,
+    single_result_assign,
 };
 
 #[derive(Clone, Debug)]
@@ -21,8 +22,9 @@ pub struct RegionRelated<'e, Va: VirtualAddress> {
     pub change_ai_region_state: Option<Va>,
 }
 
-pub(crate) struct StepUnitMovement<Va: VirtualAddress> {
+pub(crate) struct StepUnitMovement<'e, Va: VirtualAddress> {
     pub make_path: Option<Va>,
+    pub pathing_ignored_unit: Option<Operand<'e>>,
 }
 
 pub(crate) struct MakePath<Va: VirtualAddress> {
@@ -196,38 +198,61 @@ impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FindPathing<'e, E> {
 pub(crate) fn analyze_step_unit_movement<'e, E: ExecutionState<'e>>(
     actx: &AnalysisCtx<'e, E>,
     step_unit_movement: E::VirtualAddress,
-) -> StepUnitMovement<E::VirtualAddress> {
+) -> StepUnitMovement<'e, E::VirtualAddress> {
     let binary = actx.binary;
     let ctx = actx.ctx;
 
     let mut result = StepUnitMovement {
         make_path: None,
+        pathing_ignored_unit: None,
     };
 
     let mut analysis = FuncAnalysis::new(binary, ctx, step_unit_movement);
     let mut analyzer = StepUnitMovementAnalyzer::<E> {
         result: &mut result,
         state: StepUnitMovementState::Switch,
+        switch_branch: 0x11,
         inline_depth: 0,
     };
     analysis.analyze(&mut analyzer);
+
+    if result.make_path.is_some() {
+        let mut analysis = FuncAnalysis::new(binary, ctx, step_unit_movement);
+        let mut analyzer = StepUnitMovementAnalyzer::<E> {
+            result: &mut result,
+            state: StepUnitMovementState::Switch,
+            switch_branch: 0x17,
+            inline_depth: 0,
+        };
+        analysis.analyze(&mut analyzer);
+    }
     result
 }
 
 struct StepUnitMovementAnalyzer<'a, 'e, E: ExecutionState<'e>> {
-    result: &'a mut StepUnitMovement<E::VirtualAddress>,
+    result: &'a mut StepUnitMovement<'e, E::VirtualAddress>,
     inline_depth: u8,
     state: StepUnitMovementState,
+    /// The movement state whose switch branch to follow: 0x11 to find make_path, then
+    /// 0x17 (repath) to find pathing_ignored_unit.
+    switch_branch: u8,
 }
 
 enum StepUnitMovementState {
-    /// Find switch on this.movement_state
+    /// Find switch on this.movement_state, and continue at the branch for `switch_branch`.
     Switch,
     /// On branch 0x11, inline once to movement_state_11(this) if needed,
     /// and first call should be make_path(a1 = this, a2 = this.move_target)
     ///
     /// There can be extra calls with this = this and jumps if assertions are enabled.
     MakePath,
+    /// On branch 0x17 (repath), inline once to movement_state_17(this) if needed, and find the
+    /// make_path call. Before it, the old path's dodge_unit_uid is resolved to a unit and stored
+    /// in pathing_ignored_unit, so that the path search doesn't treat that unit as an obstacle.
+    RepathMakePath,
+    /// Right after make_path returns, before any other call or jump, pathing_ignored_unit is
+    /// cleared with a word-sized store of 0 to a global.
+    PathingIgnoredUnit,
 }
 
 impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for
@@ -245,10 +270,15 @@ impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for
                         let exec = ctrl.exec_state();
                         if let Some(switch) = CompleteSwitch::new(to, ctx, exec) {
                             let binary = ctrl.binary();
-                            if let Some(branch) = switch.branch(binary, ctx, 0x11) {
+                            let branch = switch.branch(binary, ctx, self.switch_branch as u32);
+                            if let Some(branch) = branch {
                                 ctrl.clear_unchecked_branches();
                                 ctrl.continue_at_address(branch);
-                                self.state = StepUnitMovementState::MakePath;
+                                self.state = if self.switch_branch == 0x11 {
+                                    StepUnitMovementState::MakePath
+                                } else {
+                                    StepUnitMovementState::RepathMakePath
+                                };
                             }
                         }
                     }
@@ -279,6 +309,39 @@ impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for
                     }
                 }
             }
+            StepUnitMovementState::RepathMakePath => {
+                if let Operation::Call(dest) = *op {
+                    if let Some(dest) = ctrl.resolve_va(dest) {
+                        if Some(dest) == self.result.make_path {
+                            self.state = StepUnitMovementState::PathingIgnoredUnit;
+                        } else if ctrl.resolve_register(1) == ctx.register(1) &&
+                            self.inline_depth == 0
+                        {
+                            self.inline_depth = 1;
+                            ctrl.analyze_with_current_state(self, dest);
+                            self.inline_depth = 0;
+                            if !matches!(self.state, StepUnitMovementState::RepathMakePath) {
+                                ctrl.end_analysis();
+                            }
+                        }
+                    }
+                }
+            }
+            StepUnitMovementState::PathingIgnoredUnit => match *op {
+                Operation::Move(DestOperand::Memory(ref mem), value) => {
+                    if mem.size == E::WORD_SIZE && ctrl.resolve(value) == ctx.const_0() {
+                        let mem = ctrl.resolve_mem(mem);
+                        if mem.is_global() {
+                            self.result.pathing_ignored_unit = Some(ctx.memory(&mem));
+                            ctrl.end_analysis();
+                        }
+                    }
+                }
+                Operation::Call(..) | Operation::Jump { .. } => {
+                    ctrl.end_analysis();
+                }
+                _ => (),
+            },
         }
     }
 }

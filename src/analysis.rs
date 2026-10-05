@@ -1027,6 +1027,11 @@ results! {
         LastActiveUnit => last_active_unit => cache_hide_unit,
         PathArray => path_array => cache_hide_unit,
         FirstFreePath => first_free_path => cache_hide_unit,
+        // Unit *; step_unit_movement sets it to the unit its old path was dodging before calling
+        // make_path, so the path search doesn't treat that unit as an obstacle, and clears it
+        // once make_path returns. Some movement states return before clearing it, leaving it set
+        // across units and frames, so it is simulation state despite being a temporary.
+        PathingIgnoredUnit => pathing_ignored_unit => cache_step_unit_movement,
         Images => images => cache_init_images,
         HpBarImages => hp_bar_images => cache_init_images,
         HpBarState => hp_bar_state => cache_init_images,
@@ -6012,10 +6017,10 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
 
     fn cache_step_unit_movement(&mut self, actx: &AnalysisCtx<'e, E>) {
         use AddressAnalysis::*;
-        self.cache_many(&[MakePath], &[], |s| {
+        self.cache_many(&[MakePath], &[OperandAnalysis::PathingIgnoredUnit], |s| {
             let step_unit_movement = s.step_unit_movement(actx)?;
             let result = pathing::analyze_step_unit_movement(actx, step_unit_movement);
-            Some(([result.make_path], []))
+            Some(([result.make_path], [result.pathing_ignored_unit]))
         })
     }
 
