@@ -601,6 +601,13 @@ results! {
         SimpleFileMatchCallback => simple_file_match_callback => cache_find_file_with_crc,
         StartCloaking => start_cloaking => cache_cloak_command,
         PrepareBuildUnit => prepare_build_unit => cache_morph_command,
+        // a1 player, a2 unit_id, a3 check_supply, a4 show_error
+        // Caches the unit's costs for the player in cached_mineral_costs / cached_gas_costs
+        // (and cached_supply_costs if check_supply) before checking them.
+        CheckUnitResourcesAndSupply => check_unit_resources_and_supply =>
+            cache_prepare_build_unit,
+        // a1 player, a2 show_error; checks cached_mineral_costs / cached_gas_costs
+        CheckCachedResources => check_cached_resources => cache_prepare_build_unit,
         UnitAiWorker => unit_ai_worker => cache_ai_order,
         UnitAiMilitary => unit_ai_military => cache_ai_order,
         AiTryProgressSpendingRequest => ai_try_progress_spending_request => cache_ai_order,
@@ -1149,6 +1156,11 @@ results! {
         // entries in both of them, so this counts collision box edges and not units.
         UnitPositionSearchEntryCount => unit_position_search_entry_count =>
             cache_unit_position_search_entry_count,
+        // u32[0xc] each, the mineral, gas, and supply costs of the unit that
+        // check_unit_resources_and_supply last checked for the player.
+        CachedMineralCosts => cached_mineral_costs => cache_prepare_build_unit,
+        CachedGasCosts => cached_gas_costs => cache_prepare_build_unit,
+        CachedSupplyCosts => cached_supply_costs => cache_prepare_build_unit,
     }
 }
 
@@ -5994,6 +6006,27 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
             let result = commands::morph(actx, process_commands, &switch);
             Some(([result.prepare_build_unit], []))
         })
+    }
+
+    fn prepare_build_unit(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<E::VirtualAddress> {
+        self.cache_many_addr(AddressAnalysis::PrepareBuildUnit, |s| s.cache_morph_command(actx))
+    }
+
+    fn cache_prepare_build_unit(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        use OperandAnalysis::*;
+        self.cache_many(
+            &[CheckUnitResourcesAndSupply, CheckCachedResources],
+            &[CachedMineralCosts, CachedGasCosts, CachedSupplyCosts],
+            |s| {
+                let prepare_build_unit = s.prepare_build_unit(actx)?;
+                let units_dat = s.dat_virtual_address(DatType::Units, actx)?;
+                let r = game::analyze_prepare_build_unit(actx, prepare_build_unit, units_dat);
+                Some((
+                    [r.check_unit_resources_and_supply, r.check_cached_resources],
+                    [r.cached_mineral_costs, r.cached_gas_costs, r.cached_supply_costs],
+                ))
+            })
     }
 
     fn cache_ai_order(&mut self, actx: &AnalysisCtx<'e, E>) {

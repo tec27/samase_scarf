@@ -1748,7 +1748,8 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 WorkerAiPoolStorage | BuildingAiPoolStorage | AiTownPoolStorage |
                 AiScriptPoolStorage | MilitaryAiPoolStorage | GuardAiPoolStorage |
                 DcreepStatePool | PlayerTriggerLists | PlayerTriggerWaitActiveFlags |
-                PlayerTriggerWaitTimers | PlayerTriggerVictoryStates | PlayerTriggerActiveFlags =>
+                PlayerTriggerWaitTimers | PlayerTriggerVictoryStates | PlayerTriggerActiveFlags |
+                CachedMineralCosts | CachedGasCosts | CachedSupplyCosts =>
             {
                 check_global_struct_opt(result, binary, op.name());
             }
