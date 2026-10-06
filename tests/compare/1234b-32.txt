@@ -48,12 +48,14 @@ can_attack_unit: 0059f6c0
 cancel_queued_unit: 00590320
 cancel_unit: 0058cd60
 change_ai_region_state: 00649cd0
+check_cached_resources: 00671a90
 check_dat_requirements: 00531800
 check_fow_order_targeting: 005b7120
 check_order_targeting: 005b71d0
 check_resources_for_building: 00671990
 check_tech_targeting: 005c7f80
 check_unit_requirements: 006535e0
+check_unit_resources_and_supply: 00671bb0
 check_weapon_targeting_flags: 0059f890
 choose_snp: 00730af0
 clamp_zoom: 0060e4d0
@@ -397,6 +399,9 @@ bnet_controller: (Mem32[e651a8] ^ 9a5be9d)
 building_ai_free_list: Mem32[ef09f0]
 building_ai_pool_storage: ee5e10
 builtin_turn_latency: Mem32[10d27fc]
+cached_gas_costs: f18a10
+cached_mineral_costs: f189e0
+cached_supply_costs: f18a40
 campaigns: e64c70
 captured_minimap_marker_count_sync_value: Mem8[10d61d2]
 captured_minimap_unit_vision_sync_value: Mem8[10d61d1]

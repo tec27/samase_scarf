@@ -76,6 +76,14 @@ pub(crate) struct CheckResourcesForBuilding<Va: VirtualAddress> {
     pub show_info_message_with_sound: Option<Va>,
 }
 
+pub(crate) struct PrepareBuildUnit<'e, Va: VirtualAddress> {
+    pub check_unit_resources_and_supply: Option<Va>,
+    pub check_cached_resources: Option<Va>,
+    pub cached_mineral_costs: Option<Operand<'e>>,
+    pub cached_gas_costs: Option<Operand<'e>>,
+    pub cached_supply_costs: Option<Operand<'e>>,
+}
+
 pub(crate) fn step_objects<'e, E: ExecutionState<'e>>(
     analysis: &AnalysisCtx<'e, E>,
     rng_enable: Operand<'e>,
@@ -2087,6 +2095,169 @@ impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for
             }
         }
 
+    }
+}
+
+/// prepare_build_unit(this = unit, a1 = unit_id) calls
+/// check_unit_resources_and_supply(unit.player, unit_id, check_supply, 1)
+/// before adding the unit to its build queue.
+///
+/// check_unit_resources_and_supply(player, unit_id, check_supply, show_error) first caches
+/// the unit's costs for the player:
+/// cached_mineral_costs[player] = units_dat_mineral_cost[unit_id]
+/// cached_gas_costs[player] = units_dat_gas_cost[unit_id]
+/// and if check_supply is set,
+/// cached_supply_costs[player] = units_dat_supply_required[unit_id]
+/// The resources are checked with check_cached_resources(player, show_error).
+///
+/// Before 1.21.2 the supply part is a separate function,
+/// check_resources_for_building(player, unit_id, show_error), so it gets inlined.
+pub(crate) fn analyze_prepare_build_unit<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    prepare_build_unit: E::VirtualAddress,
+    units_dat: (E::VirtualAddress, u32),
+) -> PrepareBuildUnit<'e, E::VirtualAddress> {
+    let mut result = PrepareBuildUnit {
+        check_unit_resources_and_supply: None,
+        check_cached_resources: None,
+        cached_mineral_costs: None,
+        cached_gas_costs: None,
+        cached_supply_costs: None,
+    };
+
+    let ctx = actx.ctx;
+    let binary = actx.binary;
+    let arg_cache = &actx.arg_cache;
+    let dat_field = |field: u32| {
+        binary.read_address(units_dat.0 + units_dat.1 * field).ok().map(|x| x.as_u64())
+    };
+    let (mineral_cost, gas_cost, supply_required) =
+        match (dat_field(0x28), dat_field(0x29), dat_field(0x2e)) {
+            (Some(a), Some(b), Some(c)) => (a, b, c),
+            _ => return result,
+        };
+
+    let mut analyzer = FindCheckUnitResourcesAndSupply::<E> {
+        result: None,
+        unit_id: ctx.and_const(arg_cache.on_thiscall_entry(0), 0xffff),
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, prepare_build_unit);
+    analysis.analyze(&mut analyzer);
+    let check_unit_resources_and_supply = match analyzer.result {
+        Some(s) => s,
+        None => return result,
+    };
+
+    let mut analyzer = CheckUnitResourcesAndSupplyAnalyzer::<E> {
+        result: &mut result,
+        player: ctx.and_const(arg_cache.on_entry(0), 0xff),
+        unit_id: ctx.and_const(arg_cache.on_entry(1), 0xffff),
+        show_error: ctx.and_const(arg_cache.on_entry(3), 0xffff_ffff),
+        mineral_cost,
+        gas_cost,
+        supply_required,
+        inline_depth: 0,
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, check_unit_resources_and_supply);
+    analysis.analyze(&mut analyzer);
+    // The mineral and gas cost stores are what identify the function.
+    if result.cached_mineral_costs.is_some() && result.cached_gas_costs.is_some() {
+        result.check_unit_resources_and_supply = Some(check_unit_resources_and_supply);
+    } else {
+        result.check_cached_resources = None;
+        result.cached_mineral_costs = None;
+        result.cached_gas_costs = None;
+        result.cached_supply_costs = None;
+    }
+    result
+}
+
+struct FindCheckUnitResourcesAndSupply<'e, E: ExecutionState<'e>> {
+    result: Option<E::VirtualAddress>,
+    unit_id: Operand<'e>,
+}
+
+impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for FindCheckUnitResourcesAndSupply<'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        // check_unit_resources_and_supply(this.player, a1 unit_id, check_supply, 1)
+        if let Operation::Call(dest) = *op {
+            let ctx = ctrl.ctx();
+            let ok = ctrl.resolve_arg_u32(3).if_constant() == Some(1) &&
+                ctrl.resolve_arg_u16(1) == self.unit_id &&
+                ctrl.resolve_arg_u8(0).if_mem8_offset(E::struct_layouts().unit_player()) ==
+                    Some(ctx.register(1));
+            if ok {
+                if let Some(dest) = ctrl.resolve_va(dest) {
+                    self.result = Some(dest);
+                    ctrl.end_analysis();
+                }
+            }
+        }
+    }
+}
+
+struct CheckUnitResourcesAndSupplyAnalyzer<'a, 'e, E: ExecutionState<'e>> {
+    result: &'a mut PrepareBuildUnit<'e, E::VirtualAddress>,
+    player: Operand<'e>,
+    unit_id: Operand<'e>,
+    show_error: Operand<'e>,
+    mineral_cost: u64,
+    gas_cost: u64,
+    supply_required: u64,
+    inline_depth: u8,
+}
+
+impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for
+    CheckUnitResourcesAndSupplyAnalyzer<'a, 'e, E>
+{
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        let ctx = ctrl.ctx();
+        match *op {
+            Operation::Move(DestOperand::Memory(ref mem), value)
+                if mem.size == MemAccessSize::Mem32 =>
+            {
+                // Mem32[cached_costs + player * 4] = units_dat_cost[unit_id]
+                let mem = ctrl.resolve_mem(mem);
+                let (index, array) = mem.address();
+                if index != ctx.mul_const(self.player, 4) {
+                    return;
+                }
+                let value = ctrl.resolve(value);
+                let unit_id_u16_index = ctx.mul_const(self.unit_id, 2);
+                let dest = if value == ctx.mem16(unit_id_u16_index, self.mineral_cost) {
+                    &mut self.result.cached_mineral_costs
+                } else if value == ctx.mem16(unit_id_u16_index, self.gas_cost) {
+                    &mut self.result.cached_gas_costs
+                } else if value == ctx.mem8(self.unit_id, self.supply_required) {
+                    &mut self.result.cached_supply_costs
+                } else {
+                    return;
+                };
+                single_result_assign(Some(ctx.constant(array)), dest);
+            }
+            Operation::Call(dest) => {
+                if self.inline_depth != 0 || ctrl.resolve_arg_u8(0) != self.player {
+                    return;
+                }
+                let Some(dest) = ctrl.resolve_va(dest) else { return };
+                if ctrl.resolve_arg_u32(1) == self.show_error {
+                    // check_cached_resources(player, show_error)
+                    single_result_assign(Some(dest), &mut self.result.check_cached_resources);
+                } else if ctrl.resolve_arg_u16(1) == self.unit_id &&
+                    self.result.cached_supply_costs.is_none()
+                {
+                    // check_resources_for_building(player, unit_id, show_error)
+                    self.inline_depth = 1;
+                    ctrl.analyze_with_current_state(self, dest);
+                    self.inline_depth = 0;
+                }
+            }
+            _ => (),
+        }
     }
 }
 
