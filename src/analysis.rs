@@ -707,6 +707,12 @@ results! {
         // time trigger_result_check_timer expires while the local player's victory state is
         // 3 or 5, and for observers once every player that runs triggers has a victory state.
         OpenVictoryMissionDialog => open_victory_mission_dialog => cache_step_triggers_state,
+        // () -> (); sets game_cursor_hidden and applies the cursor to the window.
+        // Called when middle mouse grab panning starts.
+        HideGameCursor => hide_game_cursor => cache_game_cursor_visibility,
+        // () -> (); clears game_cursor_hidden and applies the cursor to the window.
+        // Called when middle mouse grab panning ends.
+        ShowGameCursor => show_game_cursor => cache_game_cursor_visibility,
     }
 }
 
@@ -4486,6 +4492,42 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
             let scroll_handler = s.ui_default_scroll_handler(actx)?;
             let is_multiplayer = s.is_multiplayer(actx)?;
             dialog::clamp_zoom(actx, scroll_handler, is_multiplayer)
+        })
+    }
+
+    fn ui_default_middle_down_handler(
+        &mut self,
+        actx: &AnalysisCtx<'e, E>,
+    ) -> Option<E::VirtualAddress> {
+        self.cache_many_addr(
+            AddressAnalysis::UiDefaultMiddleDownHandler,
+            |s| s.cache_ui_event_handlers(actx),
+        )
+    }
+
+    fn ui_default_middle_up_handler(
+        &mut self,
+        actx: &AnalysisCtx<'e, E>,
+    ) -> Option<E::VirtualAddress> {
+        self.cache_many_addr(
+            AddressAnalysis::UiDefaultMiddleUpHandler,
+            |s| s.cache_ui_event_handlers(actx),
+        )
+    }
+
+    fn cache_game_cursor_visibility(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        self.cache_many(&[HideGameCursor, ShowGameCursor], &[], |s| {
+            let middle_down = s.ui_default_middle_down_handler(actx)?;
+            let middle_up = s.ui_default_middle_up_handler(actx)?;
+            let global_event_handlers = s.global_event_handlers(actx)?;
+            let result = dialog::game_cursor_visibility(
+                actx,
+                middle_down,
+                middle_up,
+                global_event_handlers,
+            );
+            Some(([result.hide_game_cursor, result.show_game_cursor], []))
         })
     }
 
