@@ -152,6 +152,7 @@ give_unit: 00628170
 glucmpgn_event_handler: 00698b60
 hallucination_hit: 0057cef0
 handle_targeted_click: 00743120
+hide_game_cursor: 00658ac0
 hide_unit: 005855a0
 hit_unit: 0057ce90
 init_consoles: 006534e0
@@ -277,6 +278,7 @@ sfile_open_file_ex: 008a58b0
 sfile_read_file_ex: 008a5cb0
 show_cursor_marker_at: 0056d9a0
 show_finished_unit_notification: 00690b80
+show_game_cursor: 00659df0
 show_game_message: 006ba6e0
 show_info_message_with_sound: 0068f590
 show_mission_glue: 00656c10

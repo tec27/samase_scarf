@@ -1658,6 +1658,153 @@ impl<'a, 'acx, 'e, E: ExecutionState<'e>> ResetUiEventHandlersAnalyzer<'a, 'acx,
     }
 }
 
+pub(crate) struct GameCursorVisibility<Va: VirtualAddress> {
+    pub hide_game_cursor: Option<Va>,
+    pub show_game_cursor: Option<Va>,
+}
+
+pub(crate) fn game_cursor_visibility<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    middle_down_handler: E::VirtualAddress,
+    middle_up_handler: E::VirtualAddress,
+    global_event_handlers: Operand<'e>,
+) -> GameCursorVisibility<E::VirtualAddress> {
+    // Middle mouse grab panning hides the cursor while dragging:
+    //  ui_default_middle_down_handler(event) {
+    //      grab_pan_anchor_x = event.x; (Adjusted for screen size)
+    //      grab_pan_anchor_y = event.y;
+    //      hide_game_cursor();
+    //      global_event_handlers[3] = update_middle_mouse_grab_pan;
+    //  }
+    //  ui_default_middle_up_handler(event) {
+    //      show_game_cursor();
+    //      global_event_handlers[3] = null;
+    //  }
+    // hide_game_cursor / show_game_cursor store 1 / 0 to game_cursor_hidden u8, and then
+    // tail call a function that applies the current cursor to the window.
+    // hide_game_cursor is the last call before the global_event_handlers[3] store, and
+    // show_game_cursor has to store 0 to the same global.
+    let ctx = actx.ctx;
+    let mut result = GameCursorVisibility {
+        hide_game_cursor: None,
+        show_game_cursor: None,
+    };
+    let drag_handler = ctx.mem_access(
+        global_event_handlers,
+        E::VirtualAddress::SIZE as u64 * 3,
+        E::WORD_SIZE,
+    );
+    let down_calls = calls_before_store(actx, middle_down_handler, &drag_handler);
+    let Some(&hide) = down_calls.last() else { return result };
+    let Some((game_cursor_hidden, 1)) = game_cursor_hidden_store(actx, hide) else {
+        return result;
+    };
+    result.hide_game_cursor = Some(hide);
+    result.show_game_cursor = calls_before_store(actx, middle_up_handler, &drag_handler)
+        .iter()
+        .copied()
+        .find(|&func| {
+            game_cursor_hidden_store(actx, func) == Some((game_cursor_hidden, 0))
+        });
+    result
+}
+
+/// Returns functions that `func` calls before storing to `dest`, in order.
+/// Empty if the store isn't found.
+fn calls_before_store<'acx, 'e, E: ExecutionState<'e>>(
+    actx: &'acx AnalysisCtx<'e, E>,
+    func: E::VirtualAddress,
+    dest: &MemAccess<'e>,
+) -> BumpVec<'acx, E::VirtualAddress> {
+    struct Analyzer<'a, 'acx, 'e, E: ExecutionState<'e>> {
+        dest: &'a MemAccess<'e>,
+        calls: BumpVec<'acx, E::VirtualAddress>,
+        found: bool,
+    }
+
+    impl<'a, 'acx, 'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for Analyzer<'a, 'acx, 'e, E> {
+        type State = analysis::DefaultState;
+        type Exec = E;
+        fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+            match *op {
+                Operation::Call(dest) => {
+                    if let Some(dest) = ctrl.resolve_va(dest) {
+                        self.calls.push(dest);
+                    }
+                }
+                Operation::Move(DestOperand::Memory(ref mem), _) => {
+                    if ctrl.resolve_mem(mem) == *self.dest {
+                        self.found = true;
+                        ctrl.end_analysis();
+                    }
+                }
+                _ => (),
+            }
+        }
+    }
+
+    let mut analyzer = Analyzer::<E> {
+        dest,
+        calls: bumpvec_with_capacity(0x8, &actx.bump),
+        found: false,
+    };
+    let mut analysis = FuncAnalysis::new(actx.binary, actx.ctx, func);
+    analysis.analyze(&mut analyzer);
+    if !analyzer.found {
+        analyzer.calls.clear();
+    }
+    analyzer.calls
+}
+
+/// Checks that `func` stores a constant to an u8 global and then calls / jumps to another
+/// function, returning the global and the constant.
+fn game_cursor_hidden_store<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    func: E::VirtualAddress,
+) -> Option<(Operand<'e>, u64)> {
+    struct Analyzer<'e, E: ExecutionState<'e>> {
+        store: Option<(Operand<'e>, u64)>,
+        result: Option<(Operand<'e>, u64)>,
+        phantom: std::marker::PhantomData<E>,
+    }
+
+    impl<'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for Analyzer<'e, E> {
+        type State = analysis::DefaultState;
+        type Exec = E;
+        fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+            match *op {
+                Operation::Move(DestOperand::Memory(ref mem), value) => {
+                    let dest = ctrl.resolve_mem(mem);
+                    if !dest.is_global() {
+                        return;
+                    }
+                    match ctrl.resolve(value).if_constant() {
+                        Some(c) if self.store.is_none() && mem.size == MemAccessSize::Mem8 => {
+                            self.store = Some((ctrl.ctx().memory(&dest), c));
+                        }
+                        _ => ctrl.end_analysis(),
+                    }
+                }
+                Operation::Call(..) | Operation::Jump { .. } => {
+                    self.result = self.store;
+                    ctrl.end_analysis();
+                }
+                Operation::Return(..) => ctrl.end_analysis(),
+                _ => (),
+            }
+        }
+    }
+
+    let mut analyzer = Analyzer::<E> {
+        store: None,
+        result: None,
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(actx.binary, actx.ctx, func);
+    analysis.analyze(&mut analyzer);
+    analyzer.result
+}
+
 pub(crate) fn clamp_zoom<'e, E: ExecutionState<'e>>(
     actx: &AnalysisCtx<'e, E>,
     scroll_handler: E::VirtualAddress,

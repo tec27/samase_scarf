@@ -152,6 +152,7 @@ give_unit: 140281910
 glucmpgn_event_handler: 140322ad0
 hallucination_hit: 1401a64f0
 handle_targeted_click: 14040fcf0
+hide_game_cursor: 1402beed0
 hide_unit: 1401aef30
 hit_unit: 1401a6440
 init_consoles: 1402b8280
@@ -277,6 +278,7 @@ sfile_open_file_ex: 1405b85f0
 sfile_read_file_ex: 1405b8ab0
 show_cursor_marker_at: 140191a50
 show_finished_unit_notification: 14031aea0
+show_game_cursor: 1402c06b0
 show_game_message: 140350370
 show_info_message_with_sound: 140317880
 show_mission_glue: 1402bc790
