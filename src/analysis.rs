@@ -36,6 +36,7 @@ use crate::settings;
 use crate::sound;
 use crate::step_order::{self, SecondaryOrderHook, StepOrderHiddenHook};
 use crate::sprites;
+use crate::stat_txt;
 use crate::storm;
 use crate::switch::{CompleteSwitch};
 use crate::text;
@@ -1178,6 +1179,10 @@ results! {
         // Map of group name -> (map of setting name -> GameSetting); the registry of
         // settings that are saved to the settings file. Address of the map itself.
         GameSettingGroups => game_setting_groups => cache_game_settings,
+        // StringTable of stat_txt strings in the current language. Address of the object.
+        StatTxtStringTable => stat_txt_string_table => cache_stat_txt,
+        // u16[0xe4], map string id that replaces the unit's stat_txt name if nonzero.
+        UnitMapNameOverrides => unit_map_name_overrides => cache_stat_txt,
     }
 }
 
@@ -4565,6 +4570,14 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
                 ))
             },
         )
+    }
+
+    fn cache_stat_txt(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use OperandAnalysis::*;
+        self.cache_many(&[], &[StatTxtStringTable, UnitMapNameOverrides], |s| {
+            let result = stat_txt::stat_txt(actx, &s.function_finder());
+            Some(([], [result.stat_txt_string_table, result.unit_map_name_overrides]))
+        })
     }
 
     fn cache_replay_visions(&mut self, actx: &AnalysisCtx<'e, E>) {

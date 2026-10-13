@@ -55,6 +55,7 @@ mod step_order;
 mod storm;
 mod struct_layouts;
 mod sprites;
+mod stat_txt;
 mod switch;
 mod text;
 mod units;

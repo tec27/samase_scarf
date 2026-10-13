@@ -639,6 +639,7 @@ sprite_hlines_end: ed6620
 sprite_include_in_vision_sync: ed5f08
 sprite_skin_map: e37e38
 sprites: Mem32[ed6210]
+stat_txt_string_table: 10e5170
 statport_talking_portrait_active: Mem32[10e5024]
 statport_video_id: Mem8[10e5060]
 statport_videos: Mem32[10e5044]
@@ -683,6 +684,7 @@ turn_timer_accumulator: Mem32[10aa4d8]
 ui_consoles: 10e51fc
 unique_command_user: Mem32[e5ebb4]
 unit_count: Mem32[ed6d28]
+unit_map_name_overrides: ec5db8
 unit_position_search_entry_count: Mem32[ed6b90]
 unit_should_reveal_area: Mem32[ed6d60]
 unit_skin_map: e37e24
