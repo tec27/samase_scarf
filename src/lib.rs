@@ -49,6 +49,7 @@ mod renderer;
 mod requirements;
 mod rng;
 mod save;
+mod settings;
 mod sound;
 mod step_order;
 mod storm;

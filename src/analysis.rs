@@ -32,6 +32,7 @@ use crate::renderer::{self, PrismShaders};
 use crate::requirements;
 use crate::rng;
 use crate::save;
+use crate::settings;
 use crate::sound;
 use crate::step_order::{self, SecondaryOrderHook, StepOrderHiddenHook};
 use crate::sprites;
@@ -713,6 +714,13 @@ results! {
         // () -> (); clears game_cursor_hidden and applies the cursor to the window.
         // Called when middle mouse grab panning ends.
         ShowGameCursor => show_game_cursor => cache_game_cursor_visibility,
+        // (this: *mut GameSetting, value: *const i32, defer: u8) -> (); thiscall.
+        // Sets an integer setting's value as the options menu does, notifying listeners.
+        // `defer` = 1 leaves saving the value to the settings file for later.
+        UpdateGameSettingInt => update_game_setting_int => cache_game_settings,
+        // (this: *mut GameSetting, value: *const u8, defer: u8) -> (); thiscall.
+        // Same as update_game_setting_int, but for boolean settings.
+        UpdateGameSettingBool => update_game_setting_bool => cache_game_settings,
     }
 }
 
@@ -1167,6 +1175,9 @@ results! {
         CachedMineralCosts => cached_mineral_costs => cache_prepare_build_unit,
         CachedGasCosts => cached_gas_costs => cache_prepare_build_unit,
         CachedSupplyCosts => cached_supply_costs => cache_prepare_build_unit,
+        // Map of group name -> (map of setting name -> GameSetting); the registry of
+        // settings that are saved to the settings file. Address of the map itself.
+        GameSettingGroups => game_setting_groups => cache_game_settings,
     }
 }
 
@@ -1578,6 +1589,14 @@ impl<'e, E: ExecutionState<'e>> Analysis<'e, E> {
 
     pub fn path_short_path_offset(&self) -> u64 {
         E::struct_layouts().path_short_path()
+    }
+
+    pub fn game_setting_validator_offset(&self) -> u64 {
+        E::struct_layouts().game_setting_validator()
+    }
+
+    pub fn game_setting_persistence_pending_offset(&self) -> u64 {
+        E::struct_layouts().game_setting_persistence_pending()
     }
 
     pub fn command_user(&mut self) -> Option<Operand<'e>> {
@@ -4529,6 +4548,23 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
             );
             Some(([result.hide_game_cursor, result.show_game_cursor], []))
         })
+    }
+
+    fn cache_game_settings(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        use OperandAnalysis::*;
+        self.cache_many(
+            &[UpdateGameSettingInt, UpdateGameSettingBool],
+            &[GameSettingGroups],
+            |s| {
+                let functions = s.function_finder();
+                let result = settings::game_settings(actx, &functions);
+                Some((
+                    [result.update_game_setting_int, result.update_game_setting_bool],
+                    [result.game_setting_groups],
+                ))
+            },
+        )
     }
 
     fn cache_replay_visions(&mut self, actx: &AnalysisCtx<'e, E>) {
