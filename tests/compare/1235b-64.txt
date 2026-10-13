@@ -375,6 +375,8 @@ update_attack_target: 1401ac610
 update_building_placement_state: 1402b4a80
 update_cloak_state: 1401d9640
 update_game_screen_size: 1402335a0
+update_game_setting_bool: 140155600
+update_game_setting_int: 140333940
 update_unit_visibility: 1401e88c0
 update_visibility_point: 14019a890
 active_bullet_count: Mem32[140df4340]
@@ -486,6 +488,7 @@ game_screen_lclick_callback: Mem64[140ffc380]
 game_screen_rclick_callback: Mem64[140ffc388]
 game_screen_rect_winpx: 140e12e20
 game_screen_width_bwpx: Mem32[140d3af10]
+game_setting_groups: 140d3bf20
 game_type_templates: Mem64[140d5c330]
 global_event_handlers: 140ffbbe0
 graphic_layers: 141060590

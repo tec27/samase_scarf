@@ -213,6 +213,17 @@ impl StructLayouts {
         self.pair(0x20, 0x20)
     }
 
+    /// Value validator of a GameSetting. If bit 0 is set, the word here is a tagged
+    /// pointer to the validator, otherwise the validator object is stored inline.
+    pub const fn game_setting_validator(self) -> u64 {
+        self.pair(0x78, 0xc0)
+    }
+
+    /// u8, set when the value was changed but not yet saved to the settings file.
+    pub const fn game_setting_persistence_pending(self) -> u64 {
+        self.pair(0x60, 0x90)
+    }
+
     pub const fn unit_lockdown_timer(self) -> u64 {
         self.pair(0x117, 0x1a3)
     }

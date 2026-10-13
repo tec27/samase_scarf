@@ -1637,6 +1637,9 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                     continue,
             OpenDefeatMissionDialog | OpenVictoryMissionDialog
                 if version < (1, 21, 2, b'a') => continue,
+            // Older builds use a different GameSetting layout
+            UpdateGameSettingInt | UpdateGameSettingBool
+                if version < (1, 23, 0, b'a') => continue,
             _ => (),
         }
         assert!(result.is_some(), "Missing {}", addr.name());
@@ -1667,6 +1670,7 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
             {
                 continue;
             }
+            GameSettingGroups if version < (1, 20, 10, b'a') => continue,
             Game | Players | MenuScreenId | BnetController => {
                 let result = result.unwrap_or_else(|| panic!("Didn't find {}", op.name()));
                 check_game(result, binary, op.name());
@@ -1749,7 +1753,7 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 AiScriptPoolStorage | MilitaryAiPoolStorage | GuardAiPoolStorage |
                 DcreepStatePool | PlayerTriggerLists | PlayerTriggerWaitActiveFlags |
                 PlayerTriggerWaitTimers | PlayerTriggerVictoryStates | PlayerTriggerActiveFlags |
-                CachedMineralCosts | CachedGasCosts | CachedSupplyCosts =>
+                CachedMineralCosts | CachedGasCosts | CachedSupplyCosts | GameSettingGroups =>
             {
                 check_global_struct_opt(result, binary, op.name());
             }
