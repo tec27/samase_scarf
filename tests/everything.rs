@@ -1671,6 +1671,9 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 continue;
             }
             GameSettingGroups if version < (1, 20, 10, b'a') => continue,
+            // Older builds load stat_txt from rez\stat_txt.tbl instead of a json file
+            StatTxtStringTable | UnitMapNameOverrides if version < (1, 23, 2, b'a') =>
+                continue,
             Game | Players | MenuScreenId | BnetController => {
                 let result = result.unwrap_or_else(|| panic!("Didn't find {}", op.name()));
                 check_game(result, binary, op.name());
@@ -1753,7 +1756,8 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 AiScriptPoolStorage | MilitaryAiPoolStorage | GuardAiPoolStorage |
                 DcreepStatePool | PlayerTriggerLists | PlayerTriggerWaitActiveFlags |
                 PlayerTriggerWaitTimers | PlayerTriggerVictoryStates | PlayerTriggerActiveFlags |
-                CachedMineralCosts | CachedGasCosts | CachedSupplyCosts | GameSettingGroups =>
+                CachedMineralCosts | CachedGasCosts | CachedSupplyCosts | GameSettingGroups |
+                StatTxtStringTable | UnitMapNameOverrides =>
             {
                 check_global_struct_opt(result, binary, op.name());
             }
