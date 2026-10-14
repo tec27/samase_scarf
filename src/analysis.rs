@@ -732,6 +732,15 @@ results! {
         PushRendererModeOverride => push_renderer_mode_override => cache_software_cursor,
         // () -> (); undoes the latest push_renderer_mode_override.
         PopRendererModeOverride => pop_renderer_mode_override => cache_software_cursor,
+        // (x: i32, y: i32) -> (); cdecl on 32-bit. Clamps x to [0, screen_scroll_max_x] and
+        // y to [0, screen_scroll_max_y], and sets screen_x / screen_y to them.
+        // move_screen calls this unless smooth scrolling or following another player's
+        // view is active.
+        SetScreenPosition => set_screen_position => cache_set_screen_position,
+        // () -> (); recomputes screen_scroll_max_x / screen_scroll_max_y from map size,
+        // game screen size and screen_scroll_bottom_padding_tiles, and clamps screen_x /
+        // screen_y to the new limits. Called when the game screen size changes.
+        UpdateScreenScrollBounds => update_screen_scroll_bounds => cache_screen_scroll_bounds,
     }
 }
 
@@ -1193,6 +1202,16 @@ results! {
         StatTxtStringTable => stat_txt_string_table => cache_stat_txt,
         // u16[0xe4], map string id that replaces the unit's stat_txt name if nonzero.
         UnitMapNameOverrides => unit_map_name_overrides => cache_stat_txt,
+        // u32; largest screen_x / screen_y that set_screen_position allows.
+        // map_width_pixels - game_screen_width_bwpx and
+        // map_height_pixels + (bottom padding in bw pixels) - game_screen_height_bwpx.
+        ScreenScrollMaxX => screen_scroll_max_x => cache_set_screen_position,
+        ScreenScrollMaxY => screen_scroll_max_y => cache_set_screen_position,
+        // u16; how many tiles the screen can be scrolled past the bottom of the map,
+        // letting the bottom of the map be seen above the console. Converted to bw pixels
+        // at current zoom by update_screen_scroll_bounds.
+        ScreenScrollBottomPaddingTiles => screen_scroll_bottom_padding_tiles =>
+            cache_screen_scroll_bounds,
     }
 }
 
@@ -5410,6 +5429,74 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
                     [result.move_screen],
                     [result.trigger_current_player, result.game_screen_width_bwpx,
                         result.game_screen_height_bwpx],
+                ))
+            });
+    }
+
+    fn cache_set_screen_position(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        use OperandAnalysis::*;
+        self.cache_many(
+            &[SetScreenPosition],
+            &[ScreenScrollMaxX, ScreenScrollMaxY],
+            |s| {
+                let move_screen = s.move_screen(actx)?;
+                let screen_x = s.screen_x(actx)?;
+                let screen_y = s.screen_y(actx)?;
+                let result =
+                    clientside::analyze_move_screen(actx, move_screen, screen_x, screen_y);
+                Some((
+                    [result.set_screen_position],
+                    [result.screen_scroll_max_x, result.screen_scroll_max_y],
+                ))
+            });
+    }
+
+    fn move_screen(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<E::VirtualAddress> {
+        self.cache_many_addr(AddressAnalysis::MoveScreen, |s| s.cache_center_view_action(actx))
+    }
+
+    fn screen_x(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<Operand<'e>> {
+        self.cache_many_op(OperandAnalysis::ScreenX, |s| s.cache_coord_conversion(actx))
+    }
+
+    fn screen_y(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<Operand<'e>> {
+        self.cache_many_op(OperandAnalysis::ScreenY, |s| s.cache_coord_conversion(actx))
+    }
+
+    fn screen_scroll_max_x(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<Operand<'e>> {
+        self.cache_many_op(
+            OperandAnalysis::ScreenScrollMaxX,
+            |s| s.cache_set_screen_position(actx),
+        )
+    }
+
+    fn screen_scroll_max_y(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<Operand<'e>> {
+        self.cache_many_op(
+            OperandAnalysis::ScreenScrollMaxY,
+            |s| s.cache_set_screen_position(actx),
+        )
+    }
+
+    fn cache_screen_scroll_bounds(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        use OperandAnalysis::*;
+        self.cache_many(
+            &[UpdateScreenScrollBounds],
+            &[ScreenScrollBottomPaddingTiles],
+            |s| {
+                let update_game_screen_size = s.update_game_screen_size(actx)?;
+                let max_x = s.screen_scroll_max_x(actx)?;
+                let max_y = s.screen_scroll_max_y(actx)?;
+                let result = clientside::analyze_screen_scroll_bounds(
+                    actx,
+                    update_game_screen_size,
+                    max_x,
+                    max_y,
+                );
+                Some((
+                    [result.update_screen_scroll_bounds],
+                    [result.screen_scroll_bottom_padding_tiles],
                 ))
             });
     }

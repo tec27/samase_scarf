@@ -1730,7 +1730,8 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 WorkerAiFreeList | BuildingAiFreeList | AiTownFreeList | AiScriptFreeList |
                 MilitaryAiFreeList | GuardAiFreeList | UnitPositionSearchEntryCount |
                 IsCyclingColorTable | TriggerElapsedTimeTickTimer | LeaderboardRefreshTimer |
-                AiExpansionPlayerCursor =>
+                AiExpansionPlayerCursor | ScreenScrollMaxX | ScreenScrollMaxY |
+                ScreenScrollBottomPaddingTiles =>
             {
                 check_global_opt(result, binary, op.name());
             }

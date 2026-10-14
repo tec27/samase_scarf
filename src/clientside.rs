@@ -1475,6 +1475,310 @@ impl<'e: 'acx, 'acx, 'a, E: ExecutionState<'e>> CenterViewActionAnalyzer<'e, 'ac
     }
 }
 
+pub(crate) struct MoveScreen<'e, Va: VirtualAddress> {
+    pub set_screen_position: Option<Va>,
+    pub screen_scroll_max_x: Option<Operand<'e>>,
+    pub screen_scroll_max_y: Option<Operand<'e>>,
+}
+
+pub(crate) fn analyze_move_screen<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    move_screen: E::VirtualAddress,
+    screen_x: Operand<'e>,
+    screen_y: Operand<'e>,
+) -> MoveScreen<'e, E::VirtualAddress> {
+    // move_screen(x, y) is
+    //  if !is_smooth_screen_scroll_active() && !is_follow_player_view_active(0) {
+    //      set_screen_position(x, y);
+    //  }
+    // with set_screen_position being a tail call on 32-bit.
+    // set_screen_position clamps x to [0, screen_scroll_max_x] and y to
+    // [0, screen_scroll_max_y], comparing the arguments against the limits, and stores
+    // them to screen_x / screen_y.
+    let mut result = MoveScreen {
+        set_screen_position: None,
+        screen_scroll_max_x: None,
+        screen_scroll_max_y: None,
+    };
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let mut analyzer = MoveScreenAnalyzer::<E> {
+        candidates: bumpvec_with_capacity(0x8, &actx.bump),
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, move_screen);
+    analysis.analyze(&mut analyzer);
+    for (i, &func) in analyzer.candidates.iter().enumerate() {
+        if func == move_screen || analyzer.candidates[..i].contains(&func) {
+            continue;
+        }
+        if let Some((max_x, max_y)) = set_screen_position_limits(actx, func, screen_x, screen_y) {
+            result.set_screen_position = Some(func);
+            result.screen_scroll_max_x = Some(max_x);
+            result.screen_scroll_max_y = Some(max_y);
+            break;
+        }
+    }
+    result
+}
+
+struct MoveScreenAnalyzer<'acx, 'e, E: ExecutionState<'e>> {
+    /// Called functions and tail calls.
+    candidates: BumpVec<'acx, E::VirtualAddress>,
+}
+
+impl<'acx, 'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for MoveScreenAnalyzer<'acx, 'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        match *op {
+            Operation::Call(dest) => {
+                if let Some(dest) = ctrl.resolve_va(dest) {
+                    self.candidates.push(dest);
+                }
+                // Keep esp known for the tail call check
+                ctrl.skip_call_preserve_esp();
+            }
+            Operation::Jump { condition, to } => {
+                let ctx = ctrl.ctx();
+                if condition != ctx.const_1() {
+                    return;
+                }
+                // Unconditional jump with the stack pointer back at its value on entry
+                let esp = ctrl.resolve_register(4);
+                if esp != ctx.register(4) {
+                    return;
+                }
+                if let Some(to) = ctrl.resolve_va(to) {
+                    self.candidates.push(to);
+                    ctrl.end_branch();
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
+/// If `func` compares its first argument against a Mem32 global and second argument
+/// against another, and writes to `screen_x` and `screen_y`, returns the two globals.
+fn set_screen_position_limits<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    func: E::VirtualAddress,
+    screen_x: Operand<'e>,
+    screen_y: Operand<'e>,
+) -> Option<(Operand<'e>, Operand<'e>)> {
+    struct Analyzer<'e, E: ExecutionState<'e>> {
+        args: [Operand<'e>; 2],
+        limits: [Option<Operand<'e>>; 2],
+        screen_pos: [Operand<'e>; 2],
+        screen_pos_written: [bool; 2],
+        phantom: std::marker::PhantomData<E>,
+    }
+
+    impl<'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for Analyzer<'e, E> {
+        type State = analysis::DefaultState;
+        type Exec = E;
+        fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+            match *op {
+                Operation::Jump { condition, .. } |
+                    Operation::ConditionalMove(_, _, condition) =>
+                {
+                    let condition = ctrl.resolve(condition);
+                    for part in condition.iter_no_mem_addr() {
+                        let Some((l, r)) = part.if_arithmetic_gt() else { continue };
+                        for (limit, value) in [(l, r), (r, l)] {
+                            let is_limit = limit.if_mem32().is_some_and(|x| x.is_global());
+                            if !is_limit {
+                                continue;
+                            }
+                            let value = value.unwrap_and_mask();
+                            for i in 0..2 {
+                                if value == self.args[i] {
+                                    if *self.limits[i].get_or_insert(limit) != limit {
+                                        // Inconsistent
+                                        self.limits = [None, None];
+                                        ctrl.end_analysis();
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Operation::Move(DestOperand::Memory(ref mem), _) => {
+                    let dest = ctrl.resolve_mem(mem);
+                    if !dest.is_global() {
+                        return;
+                    }
+                    let dest = ctrl.ctx().memory(&dest);
+                    for i in 0..2 {
+                        if dest == self.screen_pos[i] {
+                            self.screen_pos_written[i] = true;
+                        }
+                    }
+                }
+                _ => (),
+            }
+        }
+    }
+
+    let arg_cache = &actx.arg_cache;
+    let mut analyzer = Analyzer::<E> {
+        args: [arg_cache.on_entry(0), arg_cache.on_entry(1)],
+        limits: [None, None],
+        screen_pos: [screen_x, screen_y],
+        screen_pos_written: [false, false],
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(actx.binary, actx.ctx, func);
+    analysis.analyze(&mut analyzer);
+    let [Some(max_x), Some(max_y)] = analyzer.limits else { return None };
+    if max_x == max_y || analyzer.screen_pos_written != [true, true] {
+        return None;
+    }
+    Some((max_x, max_y))
+}
+
+pub(crate) struct ScreenScrollBounds<'e, Va: VirtualAddress> {
+    pub update_screen_scroll_bounds: Option<Va>,
+    pub screen_scroll_bottom_padding_tiles: Option<Operand<'e>>,
+}
+
+pub(crate) fn analyze_screen_scroll_bounds<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    update_game_screen_size: E::VirtualAddress,
+    screen_scroll_max_x: Operand<'e>,
+    screen_scroll_max_y: Operand<'e>,
+) -> ScreenScrollBounds<'e, E::VirtualAddress> {
+    // update_game_screen_size calls set_game_screen_viewport_dimensions(w, h), which
+    // calls update_screen_scroll_bounds:
+    //  padding_bwpx = ((screen_scroll_bottom_padding_tiles << 5) as f32 / zoom) as i32;
+    //  screen_scroll_max_y = map_height_pixels + padding_bwpx - game_screen_height_bwpx;
+    //  screen_scroll_max_x = map_width_pixels - game_screen_width_bwpx;
+    //  (Clamp screen_x / screen_y to new limits)
+    // Check functions called by update_game_screen_size, and functions called by those,
+    // for one that directly writes to both limits.
+    let mut result = ScreenScrollBounds {
+        update_screen_scroll_bounds: None,
+        screen_scroll_bottom_padding_tiles: None,
+    };
+    let bump = &actx.bump;
+    let mut checked = bumpvec_with_capacity(0x20, bump);
+    let mut to_check = bumpvec_with_capacity(0x20, bump);
+    to_check.push((update_game_screen_size, 0u8));
+    let mut pos = 0;
+    while let Some(&(func, depth)) = to_check.get(pos) {
+        pos += 1;
+        let state = screen_scroll_bounds_func(
+            actx,
+            func,
+            screen_scroll_max_x,
+            screen_scroll_max_y,
+        );
+        if state.wrote_limits == [true, true] {
+            if depth == 0 {
+                // update_game_screen_size itself is not expected to write them
+                return result;
+            }
+            result.update_screen_scroll_bounds = Some(func);
+            result.screen_scroll_bottom_padding_tiles = state.padding_tiles;
+            if result.screen_scroll_bottom_padding_tiles.is_none() {
+                // Assertion builds compute the padding in a function that first asserts
+                // zoom > 0.
+                for &call in state.calls.iter() {
+                    let padding = screen_scroll_bounds_func(
+                        actx,
+                        call,
+                        screen_scroll_max_x,
+                        screen_scroll_max_y,
+                    ).padding_tiles;
+                    if padding.is_some() {
+                        result.screen_scroll_bottom_padding_tiles = padding;
+                        break;
+                    }
+                }
+            }
+            return result;
+        }
+        if depth < 2 {
+            for &call in state.calls.iter() {
+                if !checked.contains(&call) {
+                    checked.push(call);
+                    to_check.push((call, depth + 1));
+                }
+            }
+        }
+    }
+    result
+}
+
+struct ScreenScrollBoundsFunc<'acx, 'e, E: ExecutionState<'e>> {
+    calls: BumpVec<'acx, E::VirtualAddress>,
+    wrote_limits: [bool; 2],
+    padding_tiles: Option<Operand<'e>>,
+}
+
+fn screen_scroll_bounds_func<'acx, 'e, E: ExecutionState<'e>>(
+    actx: &'acx AnalysisCtx<'e, E>,
+    func: E::VirtualAddress,
+    screen_scroll_max_x: Operand<'e>,
+    screen_scroll_max_y: Operand<'e>,
+) -> ScreenScrollBoundsFunc<'acx, 'e, E> {
+    struct Analyzer<'acx, 'e, E: ExecutionState<'e>> {
+        result: ScreenScrollBoundsFunc<'acx, 'e, E>,
+        limits: [Operand<'e>; 2],
+    }
+
+    impl<'acx, 'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for Analyzer<'acx, 'e, E> {
+        type State = analysis::DefaultState;
+        type Exec = E;
+        fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+            match *op {
+                Operation::Call(dest) => {
+                    if let Some(dest) = ctrl.resolve_va(dest) {
+                        self.result.calls.push(dest);
+                    }
+                }
+                Operation::Move(ref dest, value) => {
+                    if let DestOperand::Memory(ref mem) = *dest {
+                        let dest = ctrl.resolve_mem(mem);
+                        if dest.is_global() {
+                            let dest = ctrl.ctx().memory(&dest);
+                            for i in 0..2 {
+                                if dest == self.limits[i] {
+                                    self.result.wrote_limits[i] = true;
+                                }
+                            }
+                        }
+                    }
+                    if self.result.padding_tiles.is_none() {
+                        // (padding_tiles << 5) as f32
+                        let value = ctrl.resolve(value).unwrap_and_mask();
+                        let padding = value.if_arithmetic_lsh_const(5)
+                            .or_else(|| value.if_arithmetic_mul_const(0x20))
+                            .filter(|x| x.if_mem16().is_some_and(|x| x.is_global()));
+                        if let Some(padding) = padding {
+                            self.result.padding_tiles = Some(padding);
+                        }
+                    }
+                }
+                _ => (),
+            }
+        }
+    }
+
+    let mut analyzer = Analyzer::<E> {
+        result: ScreenScrollBoundsFunc {
+            calls: bumpvec_with_capacity(0x10, &actx.bump),
+            wrote_limits: [false, false],
+            padding_tiles: None,
+        },
+        limits: [screen_scroll_max_x, screen_scroll_max_y],
+    };
+    let mut analysis = FuncAnalysis::new(actx.binary, actx.ctx, func);
+    analysis.analyze(&mut analyzer);
+    analyzer.result
+}
+
 pub(crate) fn init_ingame_ui<'e, E: ExecutionState<'e>>(
     actx: &AnalysisCtx<'e, E>,
     functions: &FunctionFinder<'_, 'e, E>,
