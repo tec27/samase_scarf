@@ -273,6 +273,7 @@ set_briefing_music: 006e3070
 set_current_cursor_type: 00698da0
 set_music: 0076e050
 set_scmain_state: 006f9a50
+set_screen_position: 0067abb0
 set_sprite_selection_flash_timer: 005859d0
 set_unit_player: 005b3770
 sfile_close_archive: 00917020
@@ -380,6 +381,7 @@ update_cloak_state: 005c2f50
 update_game_screen_size: 00612200
 update_game_setting_bool: 00647e50
 update_game_setting_int: 0076c040
+update_screen_scroll_bounds: 0067ad70
 update_unit_visibility: 005d16f0
 update_visibility_point: 00582720
 active_bullet_count: Mem32[f6d430]
@@ -623,6 +625,9 @@ rng_enable: Mem32[117ad20]
 rng_seed: Mem32[117a910]
 run_dialog_stack: 11ab9d0
 scmain_state: Mem32[1154c6c]
+screen_scroll_bottom_padding_tiles: Mem16[fbde74]
+screen_scroll_max_x: Mem32[fbdea8]
+screen_scroll_max_y: Mem32[fbdeac]
 screen_x: Mem32[fbde64]
 screen_y: Mem32[fbde68]
 secondary_order_timer_reset_counter: Mem32[f7c0b4]
