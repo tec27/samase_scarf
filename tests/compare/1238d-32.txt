@@ -93,6 +93,7 @@ draw_image: 008442c0
 draw_minimap_main_player_units: 00bb0b00
 draw_minimap_player_units: 00bb0890
 draw_minimap_units: 00bad970
+draw_software_cursor: 008306d0
 draw_terrain: 0084c3f0
 draw_tooltip_layer: 00632b30
 drop_powerup: 0089ef10
@@ -226,6 +227,7 @@ play_smk: 00767ac0
 play_sound: 00921270
 play_sound_at_unit: 0092acc0
 player_gained_upgrade: 0089af90
+pop_renderer_mode_override: 008ec720
 pre_mission_glue: 00765c60
 prepare_build_unit: 00872020
 prepare_draw_image: 0083a740
@@ -235,6 +237,7 @@ process_async_lobby_command: 008161a0
 process_commands: 00818760
 process_events: 0077d170
 process_lobby_commands: 00818460
+push_renderer_mode_override: 008ecb80
 rand_synced: 007f6920
 randomize_player_colors: 0085e2d0
 read_whole_mpq_file: 00ad8380

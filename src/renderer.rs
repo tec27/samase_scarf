@@ -1,5 +1,6 @@
 use std::rc::Rc;
 
+use bumpalo::collections::Vec as BumpVec;
 use byteorder::{ByteOrder, LittleEndian};
 
 use scarf::{
@@ -17,8 +18,8 @@ use crate::call_tracker::CallTracker;
 use crate::float_cmp::{FloatEqTracker, FloatCmpJump};
 use crate::hash_map::{HashSet};
 use crate::util::{
-    ControlExt, ExecStateExt, OperandExt, OptionExt, single_result_assign, is_global,
-    resolve_rdata_const,
+    ControlExt, ExecStateExt, MemAccessExt, OperandExt, OptionExt, single_result_assign,
+    is_global, resolve_rdata_const, bumpvec_with_capacity, seems_assertion_call,
 };
 use crate::vtables::Vtables;
 
@@ -1312,4 +1313,318 @@ impl<'a, 'acx, 'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for
             }
         }
     }
+}
+
+pub(crate) struct SoftwareCursor<Va: VirtualAddress> {
+    pub draw_software_cursor: Option<Va>,
+    pub push_renderer_mode_override: Option<Va>,
+    pub pop_renderer_mode_override: Option<Va>,
+}
+
+pub(crate) fn software_cursor<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    draw_graphic_layers: E::VirtualAddress,
+) -> SoftwareCursor<E::VirtualAddress> {
+    // draw_graphic_layers ends with
+    //  active_ui_draw_surface = &ui_draw_surface;
+    //  for layer in graphic_layers.rev() { ... }
+    //  draw_fps_and_turn_rate_overlay(fps);
+    //  ...
+    //  draw_timed_fading_screen_overlay(...);
+    //  draw_software_cursor();
+    //  active_ui_draw_surface = null;
+    // draw_software_cursor is the last call before the store clearing the global that
+    // was set to a constant earlier, and it calls
+    // draw_renderer_texture_in_rect(texture, rect, 0x1d, ...) with 0x1d being the cursor's
+    // render mode (0x1e before 1.21.0).
+    //
+    // draw_fps_and_turn_rate_overlay wraps its drawing in
+    //  push_renderer_mode_override(0x1a);
+    //  ...
+    //  pop_renderer_mode_override();
+    // pop_renderer_mode_override only decrements the override count, which
+    // push_renderer_mode_override increments.
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let mut result = SoftwareCursor {
+        draw_software_cursor: None,
+        push_renderer_mode_override: None,
+        pop_renderer_mode_override: None,
+    };
+    let mut analyzer = DrawGraphicLayersTail::<E> {
+        calls: bumpvec_with_capacity(0x10, &actx.bump),
+        constant_stores: bumpvec_with_capacity(0x8, &actx.bump),
+        tail_calls: None,
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, draw_graphic_layers);
+    analysis.analyze(&mut analyzer);
+    let Some(tail_calls) = analyzer.tail_calls else { return result };
+    let Some((&draw_software_cursor, rest)) = tail_calls.split_last() else {
+        return result;
+    };
+    if !calls_with_const_arg(actx, draw_software_cursor, &[0x1d, 0x1e]) {
+        return result;
+    }
+    result.draw_software_cursor = Some(draw_software_cursor);
+    for (i, &func) in rest.iter().enumerate() {
+        if rest[..i].contains(&func) {
+            continue;
+        }
+        if let Some((push, pop)) = renderer_mode_override_funcs(actx, func) {
+            result.push_renderer_mode_override = Some(push);
+            result.pop_renderer_mode_override = Some(pop);
+            break;
+        }
+    }
+    result
+}
+
+struct DrawGraphicLayersTail<'acx, 'e, E: ExecutionState<'e>> {
+    /// Calls made in the current branch.
+    calls: BumpVec<'acx, E::VirtualAddress>,
+    /// Globals that have been assigned a nonzero constant.
+    constant_stores: BumpVec<'acx, Operand<'e>>,
+    /// Calls of the branch that cleared one of `constant_stores`.
+    tail_calls: Option<BumpVec<'acx, E::VirtualAddress>>,
+}
+
+impl<'acx, 'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for
+    DrawGraphicLayersTail<'acx, 'e, E>
+{
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn branch_start(&mut self, _ctrl: &mut Control<'e, '_, '_, Self>) {
+        self.calls.clear();
+    }
+
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        match *op {
+            Operation::Call(dest) => {
+                if let Some(dest) = ctrl.resolve_va(dest) {
+                    self.calls.push(dest);
+                }
+            }
+            Operation::Move(DestOperand::Memory(ref mem), value) => {
+                if mem.size != E::WORD_SIZE {
+                    return;
+                }
+                let dest = ctrl.resolve_mem(mem);
+                if !dest.is_global() {
+                    return;
+                }
+                let dest = ctrl.ctx().memory(&dest);
+                match ctrl.resolve(value).if_constant() {
+                    Some(0) => {
+                        if self.constant_stores.contains(&dest) {
+                            let bump = self.calls.bump();
+                            let calls = std::mem::replace(&mut self.calls, BumpVec::new_in(bump));
+                            self.tail_calls = Some(calls);
+                            ctrl.end_analysis();
+                        }
+                    }
+                    Some(_) => {
+                        if !self.constant_stores.contains(&dest) {
+                            self.constant_stores.push(dest);
+                        }
+                    }
+                    None => (),
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
+/// Returns true if `func` directly calls a function with one of `values` as one of its
+/// arguments.
+fn calls_with_const_arg<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    func: E::VirtualAddress,
+    values: &[u64],
+) -> bool {
+    struct Analyzer<'a, 'e, E: ExecutionState<'e>> {
+        values: &'a [u64],
+        found: bool,
+        phantom: std::marker::PhantomData<(*const E, &'e ())>,
+    }
+
+    impl<'a, 'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for Analyzer<'a, 'e, E> {
+        type State = analysis::DefaultState;
+        type Exec = E;
+        fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+            if let Operation::Call(..) = *op {
+                let found = (0..8).any(|i| {
+                    ctrl.resolve_arg_u32(i).if_constant()
+                        .is_some_and(|c| self.values.contains(&c))
+                });
+                if found {
+                    self.found = true;
+                    ctrl.end_analysis();
+                }
+            }
+        }
+    }
+
+    let mut analyzer = Analyzer::<E> {
+        values,
+        found: false,
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(actx.binary, actx.ctx, func);
+    analysis.analyze(&mut analyzer);
+    analyzer.found
+}
+
+/// If `func` calls `push(0x1a)` and later `pop()`, where `pop` only decrements a global
+/// that `push` increments, returns `(push, pop)`.
+fn renderer_mode_override_funcs<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    func: E::VirtualAddress,
+) -> Option<(E::VirtualAddress, E::VirtualAddress)> {
+    struct Analyzer<'a, 'e, E: ExecutionState<'e>> {
+        actx: &'a AnalysisCtx<'e, E>,
+        push: Option<E::VirtualAddress>,
+        result: Option<(E::VirtualAddress, E::VirtualAddress)>,
+        checked: BumpVec<'a, E::VirtualAddress>,
+    }
+
+    impl<'a, 'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for Analyzer<'a, 'e, E> {
+        type State = analysis::DefaultState;
+        type Exec = E;
+        fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+            if let Operation::Call(dest) = *op {
+                let Some(dest) = ctrl.resolve_va(dest) else { return };
+                match self.push {
+                    None => {
+                        if ctrl.resolve_arg_u16(0).if_constant() == Some(0x1a) {
+                            self.push = Some(dest);
+                        }
+                    }
+                    Some(push) => {
+                        if dest == push || self.checked.contains(&dest) {
+                            return;
+                        }
+                        self.checked.push(dest);
+                        let Some(count) = global_decrement(self.actx, dest) else { return };
+                        if increments_global(self.actx, push, count) {
+                            self.result = Some((push, dest));
+                            ctrl.end_analysis();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut analyzer = Analyzer::<E> {
+        actx,
+        push: None,
+        result: None,
+        checked: bumpvec_with_capacity(0x10, &actx.bump),
+    };
+    let mut analysis = FuncAnalysis::new(actx.binary, actx.ctx, func);
+    analysis.analyze(&mut analyzer);
+    analyzer.result
+}
+
+/// If `func` only decrements a word-sized global and returns, returns that global.
+/// Assertion builds check that the global isn't already zero before decrementing.
+fn global_decrement<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    func: E::VirtualAddress,
+) -> Option<Operand<'e>> {
+    struct Analyzer<'e, E: ExecutionState<'e>> {
+        store: Option<Operand<'e>>,
+        failed: bool,
+        phantom: std::marker::PhantomData<E>,
+    }
+
+    impl<'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for Analyzer<'e, E> {
+        type State = analysis::DefaultState;
+        type Exec = E;
+        fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+            match *op {
+                Operation::Move(DestOperand::Memory(ref mem), value) => {
+                    let dest = ctrl.resolve_mem(mem);
+                    if !dest.is_global() {
+                        // Assertion call arguments
+                        return;
+                    }
+                    let dest = ctrl.ctx().memory(&dest);
+                    let ok = mem.size == E::WORD_SIZE &&
+                        self.store.unwrap_or(dest) == dest &&
+                        ctrl.resolve(value).unwrap_and_mask().if_arithmetic_sub_const(1) ==
+                            Some(dest);
+                    if ok {
+                        self.store = Some(dest);
+                    } else {
+                        self.failed = true;
+                        ctrl.end_analysis();
+                    }
+                }
+                Operation::Call(..) => {
+                    if seems_assertion_call(ctrl) {
+                        ctrl.end_branch();
+                    } else {
+                        self.failed = true;
+                        ctrl.end_analysis();
+                    }
+                }
+                _ => (),
+            }
+        }
+    }
+
+    let mut analyzer = Analyzer::<E> {
+        store: None,
+        failed: false,
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(actx.binary, actx.ctx, func);
+    analysis.analyze(&mut analyzer);
+    if analyzer.failed {
+        None
+    } else {
+        analyzer.store
+    }
+}
+
+/// Returns true if `func` stores `global + 1` to `global`.
+fn increments_global<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    func: E::VirtualAddress,
+    global: Operand<'e>,
+) -> bool {
+    struct Analyzer<'e, E: ExecutionState<'e>> {
+        global: Operand<'e>,
+        found: bool,
+        phantom: std::marker::PhantomData<E>,
+    }
+
+    impl<'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for Analyzer<'e, E> {
+        type State = analysis::DefaultState;
+        type Exec = E;
+        fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+            if let Operation::Move(DestOperand::Memory(ref mem), value) = *op {
+                let dest = ctrl.resolve_mem(mem);
+                if ctrl.ctx().memory(&dest) != self.global {
+                    return;
+                }
+                let value = ctrl.resolve(value).unwrap_and_mask();
+                if value.if_arithmetic_add_const(1).is_some() {
+                    self.found = true;
+                    ctrl.end_analysis();
+                }
+            }
+        }
+    }
+
+    let mut analyzer = Analyzer::<E> {
+        global,
+        found: false,
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(actx.binary, actx.ctx, func);
+    analysis.analyze(&mut analyzer);
+    analyzer.found
 }

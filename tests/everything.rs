@@ -1640,6 +1640,9 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
             // Older builds use a different GameSetting layout
             UpdateGameSettingInt | UpdateGameSettingBool
                 if version < (1, 23, 0, b'a') => continue,
+            // Older builds don't draw the FPS / turn rate overlay from draw_graphic_layers
+            PushRendererModeOverride | PopRendererModeOverride
+                if version < (1, 22, 0, b'a') => continue,
             _ => (),
         }
         assert!(result.is_some(), "Missing {}", addr.name());
