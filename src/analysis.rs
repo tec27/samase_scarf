@@ -722,6 +722,16 @@ results! {
         // (this: *mut GameSetting, value: *const u8, defer: u8) -> (); thiscall.
         // Same as update_game_setting_int, but for boolean settings.
         UpdateGameSettingBool => update_game_setting_bool => cache_game_settings,
+        // () -> (); draws the software cursor with render mode 0x1d. Returns without
+        // drawing if the cursor is hidden or the hardware cursor is used.
+        // Last call of draw_graphic_layers.
+        DrawSoftwareCursor => draw_software_cursor => cache_software_cursor,
+        // (render_mode: u16) -> (); cdecl on 32-bit. Makes following draw commands use
+        // `render_mode` (sort layer and render target) until the matching
+        // pop_renderer_mode_override call.
+        PushRendererModeOverride => push_renderer_mode_override => cache_software_cursor,
+        // () -> (); undoes the latest push_renderer_mode_override.
+        PopRendererModeOverride => pop_renderer_mode_override => cache_software_cursor,
     }
 }
 
@@ -4553,6 +4563,23 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
             );
             Some(([result.hide_game_cursor, result.show_game_cursor], []))
         })
+    }
+
+    fn cache_software_cursor(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        self.cache_many(
+            &[DrawSoftwareCursor, PushRendererModeOverride, PopRendererModeOverride],
+            &[],
+            |s| {
+                let draw_graphic_layers = s.draw_graphic_layers(actx)?;
+                let result = renderer::software_cursor(actx, draw_graphic_layers);
+                Some(([
+                    result.draw_software_cursor,
+                    result.push_renderer_mode_override,
+                    result.pop_renderer_mode_override,
+                ], []))
+            },
+        )
     }
 
     fn cache_game_settings(&mut self, actx: &AnalysisCtx<'e, E>) {
