@@ -1731,7 +1731,8 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 MilitaryAiFreeList | GuardAiFreeList | UnitPositionSearchEntryCount |
                 IsCyclingColorTable | TriggerElapsedTimeTickTimer | LeaderboardRefreshTimer |
                 AiExpansionPlayerCursor | ScreenScrollMaxX | ScreenScrollMaxY |
-                ScreenScrollBottomPaddingTiles =>
+                ScreenScrollBottomPaddingTiles | ScreenScrollLastTickNegated |
+                CursorAnimationNextTick | CursorAnimationFrame | PaletteCycleLastTick =>
             {
                 check_global_opt(result, binary, op.name());
             }

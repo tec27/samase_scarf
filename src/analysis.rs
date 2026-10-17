@@ -741,6 +741,28 @@ results! {
         // game screen size and screen_scroll_bottom_padding_tiles, and clamps screen_x /
         // screen_y to the new limits. Called when the game screen size changes.
         UpdateScreenScrollBounds => update_screen_scroll_bounds => cache_screen_scroll_bounds,
+        // () -> (); the callback step_game_loop passes to render_screen(&[callback], 1).
+        // Updates in-game UI once per rendered frame, ending with the palette cycling gate
+        // that calls update_palette_cycles (in a separate function on older builds).
+        UpdateIngameHud => update_ingame_hud => cache_game_loop,
+        // () -> (); moves the screen for keyboard / mouse edge scrolling. Called by
+        // step_game_loop when screen_scroll_last_tick_negated allows it.
+        UpdateScreenScrolling => update_screen_scrolling => cache_game_loop,
+        // () -> (); called by step_game_loop every iteration, before the screen scroll gate.
+        // Picks the cursor (scroll arrow if mouse is at screen edge, otherwise
+        // decide_cursor_type, which is inlined on some builds), and steps cursor animation:
+        //  now = GetTickCount();
+        //  if (now - cursor_animation_next_tick) as i32 >= 0 {
+        //      cursor_animation_frame += 1;
+        //      cursor_animation_next_tick = now + 100;
+        //  }
+        UpdateGameCursor => update_game_cursor => cache_cursor_animation,
+        // () -> (); the cursor animation step of update_game_cursor, without choosing
+        // the cursor. Used as a callback by menus; has no direct calls.
+        StepMenuCursorAnimation => step_menu_cursor_animation => cache_cursor_animation,
+        // () -> (); steps the tileset palette color cycles and marks the palette as
+        // needing update. Called by update_ingame_hud when palette_cycle_last_tick allows it.
+        UpdatePaletteCycles => update_palette_cycles => cache_palette_cycles,
     }
 }
 
@@ -1212,6 +1234,29 @@ results! {
         // at current zoom by update_screen_scroll_bounds.
         ScreenScrollBottomPaddingTiles => screen_scroll_bottom_padding_tiles =>
             cache_screen_scroll_bounds,
+        // u32; negated GetTickCount() value from when update_screen_scrolling was last
+        // called. step_game_loop does
+        //  if (screen_scroll_last_tick_negated + now) as u32 > 10 {
+        //      screen_scroll_last_tick_negated = 0 - now;
+        //      update_screen_scrolling();
+        //  }
+        // i.e. scrolls when more than 10 milliseconds have passed.
+        ScreenScrollLastTickNegated => screen_scroll_last_tick_negated => cache_game_loop,
+        // u32; GetTickCount() value at which the cursor animation advances next.
+        // The frame advances when (GetTickCount() - this) as i32 >= 0, and this is then
+        // set to GetTickCount() + 100.
+        CursorAnimationNextTick => cursor_animation_next_tick => cache_cursor_animation,
+        // u32; current cursor animation frame, incremented without wrapping to frame count.
+        // draw_software_cursor draws frame `cursor_animation_frame % frame_count`.
+        CursorAnimationFrame => cursor_animation_frame => cache_cursor_animation,
+        // u32; GetTickCount() value from when update_palette_cycles was last called.
+        // update_ingame_hud does (if the window is not minimized, color cycling setting is
+        // enabled and the game is not paused)
+        //  if (now - palette_cycle_last_tick) as u32 >= 10 {
+        //      palette_cycle_last_tick = now;
+        //      update_palette_cycles();
+        //  }
+        PaletteCycleLastTick => palette_cycle_last_tick => cache_palette_cycles,
     }
 }
 
@@ -4927,20 +4972,22 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
         use OperandAnalysis::*;
         self.cache_many(
             &[StepNetwork, RenderScreen, SkipRender, LoadPcx, SetMusic, StepGameLoop,
-            ProcessEvents, StepGameLogic],
+            ProcessEvents, StepGameLogic, UpdateIngameHud, UpdateScreenScrolling],
             &[MainPalette, PaletteSet, TfontGam, SyncActive, SyncData, MenuScreenId,
-            ContinueGameLoop, AntiTroll, StepGameFrames, NextGameStepTick, ReplaySeekFrame],
+            ContinueGameLoop, AntiTroll, StepGameFrames, NextGameStepTick, ReplaySeekFrame,
+            ScreenScrollLastTickNegated],
             |s|
         {
             let game_loop = s.game_loop(actx)?;
             let game = s.game(actx)?;
             let result = game_init::analyze_game_loop(actx, game_loop, game);
             Some(([result.step_network, result.render_screen, result.skip_render, result.load_pcx,
-                result.set_music, result.step_game_loop, result.process_events, result.step_game_logic],
+                result.set_music, result.step_game_loop, result.process_events, result.step_game_logic,
+                result.update_ingame_hud, result.update_screen_scrolling],
                 [result.main_palette, result.palette_set, result.tfontgam, result.sync_active,
                 result.sync_data, result.menu_screen_id, result.continue_game_loop,
                 result.anti_troll, result.step_game_frames, result.next_game_step_tick,
-                result.replay_seek_frame]))
+                result.replay_seek_frame, result.screen_scroll_last_tick_negated]))
         })
     }
 
@@ -5498,6 +5545,61 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
                     [result.update_screen_scroll_bounds],
                     [result.screen_scroll_bottom_padding_tiles],
                 ))
+            });
+    }
+
+    fn draw_software_cursor(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<E::VirtualAddress> {
+        self.cache_many_addr(
+            AddressAnalysis::DrawSoftwareCursor,
+            |s| s.cache_software_cursor(actx),
+        )
+    }
+
+    fn decide_cursor_type(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<E::VirtualAddress> {
+        self.cache_many_addr(AddressAnalysis::DecideCursorType, |s| s.cache_select_mouse_up(actx))
+    }
+
+    fn cache_cursor_animation(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        use OperandAnalysis::*;
+        self.cache_many(
+            &[UpdateGameCursor, StepMenuCursorAnimation],
+            &[CursorAnimationNextTick, CursorAnimationFrame],
+            |s| {
+                let draw_software_cursor = s.draw_software_cursor(actx)?;
+                let decide_cursor_type = s.decide_cursor_type(actx)?;
+                let max_x = s.screen_scroll_max_x(actx)?;
+                let max_y = s.screen_scroll_max_y(actx)?;
+                let functions = s.function_finder();
+                let result = clientside::analyze_cursor_animation(
+                    actx,
+                    &functions,
+                    draw_software_cursor,
+                    decide_cursor_type,
+                    max_x,
+                    max_y,
+                );
+                Some((
+                    [result.update_game_cursor, result.step_menu_cursor_animation],
+                    [result.cursor_animation_next_tick, result.cursor_animation_frame],
+                ))
+            });
+    }
+
+    fn update_ingame_hud(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<E::VirtualAddress> {
+        self.cache_many_addr(AddressAnalysis::UpdateIngameHud, |s| s.cache_game_loop(actx))
+    }
+
+    fn cache_palette_cycles(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        use OperandAnalysis::*;
+        self.cache_many(
+            &[UpdatePaletteCycles],
+            &[PaletteCycleLastTick],
+            |s| {
+                let update_ingame_hud = s.update_ingame_hud(actx)?;
+                let result = clientside::analyze_palette_cycles(actx, update_ingame_hud);
+                Some(([result.update_palette_cycles], [result.palette_cycle_last_tick]))
             });
     }
 

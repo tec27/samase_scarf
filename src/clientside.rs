@@ -3,8 +3,8 @@ use bumpalo::collections::Vec as BumpVec;
 use scarf::analysis::{self, Control, FuncAnalysis};
 use scarf::exec_state::{ExecutionState, VirtualAddress};
 use scarf::{
-    BinaryFile, BinarySection, DestOperand, MemAccess, MemAccessSize, Operand, OperandCtx,
-    Operation, Rva, ArithOpType,
+    BinaryFile, BinarySection, DestOperand, DisasmError, MemAccess, MemAccessSize, Operand,
+    OperandCtx, Operation, Rva, ArithOpType,
 };
 
 use crate::analysis::{AnalysisCtx, ArgCache, Patch};
@@ -1773,6 +1773,536 @@ fn screen_scroll_bounds_func<'acx, 'e, E: ExecutionState<'e>>(
             padding_tiles: None,
         },
         limits: [screen_scroll_max_x, screen_scroll_max_y],
+    };
+    let mut analysis = FuncAnalysis::new(actx.binary, actx.ctx, func);
+    analysis.analyze(&mut analyzer);
+    analyzer.result
+}
+
+pub(crate) struct CursorAnimation<'e, Va: VirtualAddress> {
+    pub update_game_cursor: Option<Va>,
+    pub step_menu_cursor_animation: Option<Va>,
+    pub cursor_animation_next_tick: Option<Operand<'e>>,
+    pub cursor_animation_frame: Option<Operand<'e>>,
+}
+
+pub(crate) fn analyze_cursor_animation<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    functions: &FunctionFinder<'_, 'e, E>,
+    draw_software_cursor: E::VirtualAddress,
+    decide_cursor_type: E::VirtualAddress,
+    screen_scroll_max_x: Operand<'e>,
+    screen_scroll_max_y: Operand<'e>,
+) -> CursorAnimation<'e, E::VirtualAddress> {
+    // draw_software_cursor draws frame `cursor_animation_frame % frame_count` of the
+    // current cursor.
+    // update_game_cursor and step_menu_cursor_animation both end with
+    //  now = GetTickCount();
+    //  if (now - cursor_animation_next_tick) as i32 >= 0 {
+    //      cursor_animation_frame += 1;
+    //      cursor_animation_next_tick = now + 100;
+    //      update_software_cursor_bounds();
+    //  }
+    // Check functions using cursor_animation_frame for that pattern.
+    // update_game_cursor also selects the cursor before that, using a scroll arrow cursor
+    // if the mouse is at screen edge and screen_x / screen_y is not at the limit, and
+    // decide_cursor_type otherwise. Depending on build, either the screen_scroll_max_x /
+    // screen_scroll_max_y comparisons are in a separate function, or decide_cursor_type
+    // is inlined, so accept either one to tell update_game_cursor apart from
+    // step_menu_cursor_animation.
+    let mut result = CursorAnimation {
+        update_game_cursor: None,
+        step_menu_cursor_animation: None,
+        cursor_animation_next_tick: None,
+        cursor_animation_frame: None,
+    };
+    let Some(frame) = cursor_animation_frame(actx, draw_software_cursor) else {
+        return result;
+    };
+    let Some(frame_addr) = frame.if_memory()
+        .and_then(|x| x.if_constant_address())
+        .map(|x| E::VirtualAddress::from_u64(x)) else { return result };
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let funcs = functions.functions();
+    let global_refs = functions.find_functions_using_global(actx, frame_addr);
+    let mut matches = bumpvec_with_capacity(4, &actx.bump);
+    for global_ref in global_refs.iter() {
+        let use_address = global_ref.use_address;
+        let entry_result = entry_of_until(binary, &funcs, use_address, |entry| {
+            let mut analyzer = CursorAnimationAnalyzer::<E> {
+                frame,
+                use_address,
+                reached_use: false,
+                scroll_limits: [screen_scroll_max_x, screen_scroll_max_y],
+                decide_cursor_type,
+                selects_cursor: false,
+                next_tick: None,
+                frame_incremented: false,
+                next_tick_written: false,
+                found: None,
+            };
+            let mut analysis = FuncAnalysis::new(binary, ctx, entry);
+            analysis.analyze(&mut analyzer);
+            if !analyzer.reached_use {
+                EntryOf::Retry
+            } else if let Some(next_tick) = analyzer.found {
+                EntryOf::Ok((next_tick, analyzer.selects_cursor))
+            } else {
+                EntryOf::Stop
+            }
+        }).into_option_with_entry();
+        if let Some((entry, (next_tick, is_game_cursor))) = entry_result {
+            if !matches.iter().any(|&(x, _, _)| x == entry) {
+                matches.push((entry, next_tick, is_game_cursor));
+            }
+        }
+    }
+    let mut game_cursor = None;
+    let mut menu_cursor = None;
+    let mut next_tick = None;
+    for &(entry, tick, is_game_cursor) in matches.iter() {
+        let out = match is_game_cursor {
+            true => &mut game_cursor,
+            false => &mut menu_cursor,
+        };
+        if out.is_some() || *next_tick.get_or_insert(tick) != tick {
+            // Ambiguous
+            return result;
+        }
+        *out = Some(entry);
+    }
+    if game_cursor.is_some() {
+        result.update_game_cursor = game_cursor;
+        result.step_menu_cursor_animation = menu_cursor;
+        result.cursor_animation_next_tick = next_tick;
+        result.cursor_animation_frame = Some(frame);
+    }
+    result
+}
+
+/// Finds Mem32 global `frame` from `frame % frame_count` in draw_software_cursor.
+/// 32-bit has it in a separate function that returns the current frame of the cursor.
+fn cursor_animation_frame<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    draw_software_cursor: E::VirtualAddress,
+) -> Option<Operand<'e>> {
+    struct Analyzer<'e, E: ExecutionState<'e>> {
+        result: Option<Operand<'e>>,
+        inlining: bool,
+        phantom: std::marker::PhantomData<E>,
+    }
+
+    impl<'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for Analyzer<'e, E> {
+        type State = analysis::DefaultState;
+        type Exec = E;
+        fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+            match *op {
+                Operation::Move(_, value) => {
+                    let value = ctrl.resolve(value);
+                    let frame = value.iter_no_mem_addr()
+                        .filter_map(|x| x.if_arithmetic(ArithOpType::Modulo))
+                        .map(|x| x.0.unwrap_and_mask())
+                        .find(|x| x.if_mem32().is_some_and(|x| x.is_global()));
+                    if let Some(frame) = frame {
+                        self.result = Some(frame);
+                        ctrl.end_analysis();
+                    }
+                }
+                Operation::Call(dest) => {
+                    if self.inlining {
+                        ctrl.end_analysis();
+                        return;
+                    }
+                    if let Some(dest) = ctrl.resolve_va(dest) {
+                        self.inlining = true;
+                        ctrl.analyze_with_current_state(self, dest);
+                        self.inlining = false;
+                        if self.result.is_some() {
+                            ctrl.end_analysis();
+                        }
+                    }
+                }
+                _ => (),
+            }
+        }
+    }
+
+    let mut analyzer = Analyzer::<E> {
+        result: None,
+        inlining: false,
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(actx.binary, actx.ctx, draw_software_cursor);
+    analysis.analyze(&mut analyzer);
+    analyzer.result
+}
+
+struct CursorAnimationAnalyzer<'e, E: ExecutionState<'e>> {
+    frame: Operand<'e>,
+    use_address: E::VirtualAddress,
+    reached_use: bool,
+    scroll_limits: [Operand<'e>; 2],
+    decide_cursor_type: E::VirtualAddress,
+    /// Set if the function compares against screen scroll limits or calls
+    /// decide_cursor_type.
+    selects_cursor: bool,
+    /// Set while analyzing the branch where `now - next_tick` was not negative.
+    next_tick: Option<Operand<'e>>,
+    frame_incremented: bool,
+    next_tick_written: bool,
+    found: Option<Operand<'e>>,
+}
+
+impl<'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for CursorAnimationAnalyzer<'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        let ctx = ctrl.ctx();
+        if ctrl.instruction_contains_address(self.use_address) {
+            self.reached_use = true;
+        }
+        match *op {
+            Operation::Call(dest) => {
+                if let Some(next_tick) = self.next_tick {
+                    if self.frame_incremented && self.next_tick_written {
+                        self.found = Some(next_tick);
+                    }
+                    ctrl.end_analysis();
+                    return;
+                }
+                if ctrl.resolve_va(dest) == Some(self.decide_cursor_type) {
+                    self.selects_cursor = true;
+                }
+                // Make GetTickCount() result Custom
+                ctrl.do_call_with_result(ctx.custom(0));
+            }
+            Operation::Jump { condition, to } => {
+                if let Some(next_tick) = self.next_tick {
+                    // Tail call to update_software_cursor_bounds
+                    if condition == ctx.const_1() &&
+                        self.frame_incremented && self.next_tick_written
+                    {
+                        self.found = Some(next_tick);
+                        ctrl.end_analysis();
+                    }
+                    return;
+                }
+                if self.found.is_some() {
+                    return;
+                }
+                let condition = ctrl.resolve(condition);
+                if !self.selects_cursor {
+                    self.selects_cursor = condition.iter_no_mem_addr()
+                        .any(|x| self.scroll_limits.contains(&x));
+                }
+                // ((now - next_tick) & 0x8000_0000) == 0
+                let result = condition.if_arithmetic_eq_neq_zero(ctx)
+                    .and_then(|x| {
+                        let (l, r) = x.0.if_arithmetic_and_const(0x8000_0000)?
+                            .if_arithmetic_sub()?;
+                        Operand::and_masked(l).0.if_custom()?;
+                        if !r.if_mem32()?.is_global() {
+                            return None;
+                        }
+                        Some((r, x.1))
+                    });
+                if let Some((next_tick, eq_zero)) = result {
+                    let pass_addr = match eq_zero {
+                        true => ctrl.resolve_va(to),
+                        false => Some(ctrl.current_instruction_end()),
+                    };
+                    if let Some(pass_addr) = pass_addr {
+                        self.next_tick = Some(next_tick);
+                        self.frame_incremented = false;
+                        self.next_tick_written = false;
+                        // Continue in the same function, keeping stack pointer as is
+                        let exec_state = ctrl.exec_state().clone();
+                        let mut analysis = FuncAnalysis::custom_state(
+                            ctrl.binary(),
+                            ctx,
+                            pass_addr,
+                            exec_state,
+                            Default::default(),
+                        );
+                        analysis.analyze(self);
+                        self.next_tick = None;
+                    }
+                    ctrl.end_branch();
+                }
+            }
+            Operation::Move(DestOperand::Memory(ref mem), value) => {
+                let Some(next_tick) = self.next_tick else { return };
+                let dest = ctrl.resolve_mem(mem);
+                if !dest.is_global() {
+                    return;
+                }
+                let dest = ctx.memory(&dest);
+                let value = ctrl.resolve(value).unwrap_and_mask();
+                if dest == self.frame {
+                    // frame += 1
+                    self.frame_incremented = value.if_arithmetic_add_const(1)
+                        .filter(|&x| x.unwrap_and_mask() == self.frame)
+                        .is_some();
+                } else if dest == next_tick {
+                    // next_tick = now + 100
+                    self.next_tick_written = value.if_arithmetic_add_const(100)
+                        .and_then(|x| Operand::and_masked(x).0.if_custom())
+                        .is_some();
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
+pub(crate) struct PaletteCycles<'e, Va: VirtualAddress> {
+    pub update_palette_cycles: Option<Va>,
+    pub palette_cycle_last_tick: Option<Operand<'e>>,
+}
+
+pub(crate) fn analyze_palette_cycles<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    update_ingame_hud: E::VirtualAddress,
+) -> PaletteCycles<'e, E::VirtualAddress> {
+    // update_ingame_hud ends with
+    //  if !IsIconic(hwnd) && color_cycle_setting && !game_is_paused() {
+    //      now = GetTickCount();
+    //      if now - palette_cycle_last_tick >= 10 {
+    //          palette_cycle_last_tick = now;
+    //          update_palette_cycles();
+    //      }
+    //  }
+    // Some builds have that in a separate function called by update_ingame_hud, with
+    // update_palette_cycles being a tail call; update_ingame_hud is also obfuscated in a
+    // way that scarf doesn't always get to the end of it, so check the functions it
+    // calls too, starting from the last one.
+    // update_palette_cycles calls step_palette_cycles(cycles, 0, 0x80) and
+    // step_palette_cycles(cycles + n * size, n, 0x100), which is checked to confirm the
+    // function.
+    let mut result = PaletteCycles {
+        update_palette_cycles: None,
+        palette_cycle_last_tick: None,
+    };
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let bump = &actx.bump;
+    let mut calls = bumpvec_with_capacity(0x40, bump);
+    let mut analyzer = PaletteCycleGateAnalyzer::<E> {
+        result: None,
+        last_tick: None,
+        last_tick_written: false,
+        next_custom: 0,
+        calls: Some(&mut calls),
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, update_ingame_hud);
+    analysis.analyze(&mut analyzer);
+    let mut candidate = analyzer.result
+        .filter(|&(func, _)| is_update_palette_cycles(actx, func));
+    if candidate.is_none() {
+        for &func in calls.iter().rev() {
+            let mut analyzer = PaletteCycleGateAnalyzer::<E> {
+                result: None,
+                last_tick: None,
+                last_tick_written: false,
+                next_custom: 0,
+                calls: None,
+            };
+            let mut analysis = FuncAnalysis::new(binary, ctx, func);
+            analysis.analyze(&mut analyzer);
+            if let Some((func, last_tick)) = analyzer.result {
+                if is_update_palette_cycles(actx, func) {
+                    candidate = Some((func, last_tick));
+                    break;
+                }
+            }
+        }
+    }
+    if let Some((func, last_tick)) = candidate {
+        result.update_palette_cycles = Some(func);
+        result.palette_cycle_last_tick = Some(last_tick);
+    }
+    result
+}
+
+struct PaletteCycleGateAnalyzer<'a, 'acx, 'e, E: ExecutionState<'e>> {
+    /// (update_palette_cycles, palette_cycle_last_tick)
+    result: Option<(E::VirtualAddress, Operand<'e>)>,
+    /// Set while analyzing the branch where the gate passed.
+    last_tick: Option<Operand<'e>>,
+    last_tick_written: bool,
+    next_custom: u32,
+    /// Called functions, if they should be collected.
+    calls: Option<&'a mut BumpVec<'acx, E::VirtualAddress>>,
+}
+
+impl<'a, 'acx, 'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for
+    PaletteCycleGateAnalyzer<'a, 'acx, 'e, E>
+{
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        let ctx = ctrl.ctx();
+        match *op {
+            Operation::Call(dest) => {
+                let dest = ctrl.resolve_va(dest);
+                if let Some(last_tick) = self.last_tick {
+                    // Inside gate branch, the first call is update_palette_cycles
+                    if self.last_tick_written {
+                        if let Some(dest) = dest {
+                            self.result = Some((dest, last_tick));
+                        }
+                    }
+                    ctrl.end_analysis();
+                    return;
+                }
+                if let Some(dest) = dest {
+                    if let Some(ref mut calls) = self.calls {
+                        if !calls.contains(&dest) {
+                            calls.push(dest);
+                        }
+                    }
+                }
+                ctrl.do_call_with_result(ctx.custom(self.next_custom));
+                self.next_custom = self.next_custom.wrapping_add(1);
+            }
+            Operation::Jump { condition, to } => {
+                if let Some(last_tick) = self.last_tick {
+                    // Tail call to update_palette_cycles.
+                    // (Stack pointer isn't known on 32-bit after the calls with
+                    // do_call_with_result, so not checking that; the result is verified
+                    // with is_update_palette_cycles anyway)
+                    let is_tail_call = condition == ctx.const_1() && self.last_tick_written;
+                    if is_tail_call {
+                        if let Some(dest) = ctrl.resolve_va(to) {
+                            self.result = Some((dest, last_tick));
+                        }
+                    }
+                    ctrl.end_analysis();
+                    return;
+                }
+                let condition = ctrl.resolve(condition);
+                if let Some((last_tick, jump_if_pass)) = palette_cycle_gate(condition, ctx) {
+                    let pass_addr = match jump_if_pass {
+                        true => ctrl.resolve_va(to),
+                        false => Some(ctrl.current_instruction_end()),
+                    };
+                    if let Some(pass_addr) = pass_addr {
+                        self.last_tick = Some(last_tick);
+                        self.last_tick_written = false;
+                        // Continue in the same function, keeping stack pointer as is
+                        let exec_state = ctrl.exec_state().clone();
+                        let mut analysis = FuncAnalysis::custom_state(
+                            ctrl.binary(),
+                            ctx,
+                            pass_addr,
+                            exec_state,
+                            Default::default(),
+                        );
+                        analysis.analyze(self);
+                        self.last_tick = None;
+                        if self.result.is_some() {
+                            ctrl.end_analysis();
+                        }
+                    }
+                }
+            }
+            Operation::Move(DestOperand::Memory(ref mem), value) => {
+                let Some(last_tick) = self.last_tick else { return };
+                // last_tick = now
+                let dest = ctrl.resolve_mem(mem);
+                if dest.is_global() && ctx.memory(&dest) == last_tick {
+                    let value = ctrl.resolve(value);
+                    if Operand::and_masked(value).0.if_custom().is_some() {
+                        self.last_tick_written = true;
+                    } else {
+                        ctrl.end_analysis();
+                    }
+                }
+            }
+            Operation::Error(DisasmError::UnknownOpcode(ref bytes, _)) => {
+                // Obfuscated update_ingame_hud may have `int 0x29` (__fastfail) right
+                // before the gate, with nothing jumping past it; the protected binary still
+                // executes the code after it, so continue there.
+                if bytes[..2] == [0xcd, 0x29] {
+                    ctrl.add_branch_with_current_state(ctrl.address() + 2);
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
+/// Checks for `(current_tick - Mem32[last_tick]) >= 10` jump condition, where current_tick
+/// is a Custom call result.
+/// Returns (`Mem32[last_tick]`, true if the jump is taken when the comparison is true).
+fn palette_cycle_gate<'e>(
+    condition: Operand<'e>,
+    ctx: OperandCtx<'e>,
+) -> Option<(Operand<'e>, bool)> {
+    let (condition, is_eq_zero) = match condition.if_arithmetic_eq_neq_zero(ctx) {
+        Some((x, is_eq)) => (x, is_eq),
+        None => (condition, false),
+    };
+    let (l, r) = condition.if_arithmetic_gt()?;
+    // `x > 9` (Same as `x >= 10`) or `10 > x`
+    let (value, jump_if_gt) = if r.if_constant() == Some(9) {
+        (l, true)
+    } else if l.if_constant() == Some(0xa) {
+        (r, false)
+    } else {
+        return None;
+    };
+    let (now, last_tick) = value.unwrap_and_mask().if_arithmetic_sub()?;
+    Operand::and_masked(now).0.if_custom()?;
+    if !last_tick.if_mem32().is_some_and(|x| x.is_global()) {
+        return None;
+    }
+    // Jump is taken when comparison is false if is_eq_zero
+    let jump_if_pass = jump_if_gt != is_eq_zero;
+    Some((last_tick, jump_if_pass))
+}
+
+/// Checks that `func` calls a function twice, with arguments `(_, 0, 0x80)` and
+/// `(_, _, 0x100)`.
+fn is_update_palette_cycles<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    func: E::VirtualAddress,
+) -> bool {
+    struct Analyzer<'e, E: ExecutionState<'e>> {
+        first_call: Option<E::VirtualAddress>,
+        result: bool,
+    }
+
+    impl<'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for Analyzer<'e, E> {
+        type State = analysis::DefaultState;
+        type Exec = E;
+        fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+            if let Operation::Call(dest) = *op {
+                let Some(dest) = ctrl.resolve_va(dest) else { return };
+                let count = ctrl.resolve_arg_u32(2).if_constant();
+                match self.first_call {
+                    None => {
+                        let ok = count == Some(0x80) &&
+                            ctrl.resolve_arg_u32(1) == ctrl.ctx().const_0();
+                        if ok {
+                            self.first_call = Some(dest);
+                        }
+                    }
+                    Some(first) => {
+                        if first == dest && count == Some(0x100) {
+                            self.result = true;
+                            ctrl.end_analysis();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut analyzer = Analyzer::<E> {
+        first_call: None,
+        result: false,
     };
     let mut analysis = FuncAnalysis::new(actx.binary, actx.ctx, func);
     analysis.analyze(&mut analyzer);

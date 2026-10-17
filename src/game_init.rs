@@ -120,6 +120,9 @@ pub(crate) struct GameLoopAnalysis<'e, Va: VirtualAddress> {
     pub step_game_frames: Option<Operand<'e>>,
     pub next_game_step_tick: Option<Operand<'e>>,
     pub replay_seek_frame: Option<Operand<'e>>,
+    pub update_ingame_hud: Option<Va>,
+    pub update_screen_scrolling: Option<Va>,
+    pub screen_scroll_last_tick_negated: Option<Operand<'e>>,
 }
 
 pub(crate) struct ProcessEventsAnalysis<'e, Va: VirtualAddress> {
@@ -4084,6 +4087,9 @@ pub(crate) fn analyze_game_loop<'e, E: ExecutionState<'e>>(
         step_game_frames: None,
         next_game_step_tick: None,
         replay_seek_frame: None,
+        update_ingame_hud: None,
+        update_screen_scrolling: None,
+        screen_scroll_last_tick_negated: None,
     };
 
     let binary = actx.binary;
@@ -4118,11 +4124,60 @@ pub(crate) fn analyze_game_loop<'e, E: ExecutionState<'e>>(
             inlining: false,
             current_entry: None,
             inline_limit: 0,
+            screen_scroll_gate_candidate: None,
+            screen_scroll_gate_store_seen: false,
         };
         let mut analysis = FuncAnalysis::new(binary, ctx, step_game_loop);
         analysis.analyze(&mut analyzer);
+        if let Some(render_screen) = result.render_screen {
+            result.update_ingame_hud =
+                analyze_update_ingame_hud(actx, step_game_loop, render_screen);
+        }
     }
     result
+}
+
+/// Finds the callback passed in render_screen(&[callback], 1) call of step_game_loop.
+/// (The render_screen call that analyze_game_loop uses to find render_screen is
+/// before the main loop, and uses a different callback)
+fn analyze_update_ingame_hud<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    step_game_loop: E::VirtualAddress,
+    render_screen: E::VirtualAddress,
+) -> Option<E::VirtualAddress> {
+    struct Analyzer<'e, E: ExecutionState<'e>> {
+        render_screen: E::VirtualAddress,
+        result: Option<E::VirtualAddress>,
+    }
+
+    impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for Analyzer<'e, E> {
+        type State = analysis::DefaultState;
+        type Exec = E;
+        fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+            if let Operation::Call(dest) = *op {
+                if ctrl.resolve_va(dest) == Some(self.render_screen) {
+                    let ctx = ctrl.ctx();
+                    if ctrl.resolve_arg(1) == ctx.const_1() {
+                        let arg1 = ctrl.resolve_arg(0);
+                        let arg1_mem = ctx.mem_access(arg1, 0, E::WORD_SIZE);
+                        self.result = ctrl.read_memory(&arg1_mem)
+                            .if_constant()
+                            .filter(|&va| va >= ctrl.binary().base().as_u64())
+                            .map(|x| E::VirtualAddress::from_u64(x));
+                    }
+                    ctrl.end_analysis();
+                }
+            }
+        }
+    }
+
+    let mut analyzer = Analyzer::<E> {
+        render_screen,
+        result: None,
+    };
+    let mut analysis = FuncAnalysis::new(actx.binary, actx.ctx, step_game_loop);
+    analysis.analyze(&mut analyzer);
+    analyzer.result
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -4166,6 +4221,11 @@ enum StepGameLoopAnalysisState {
     // Call results are made Custom(x) so current_tick should be custom.
     // Due to it being signed comparision it shows up as a sign bit check condition.
     NextGameStepTick,
+    // Entered from NextGameStepTick on the branch where the screen scroll gate
+    // `(screen_scroll_last_tick_negated + current_tick) > 10` passed.
+    // Expect a store of -current_tick to the gate global, followed by a call to
+    // update_screen_scrolling.
+    ScreenScrollGate,
     StepGame,
     StepGameFrames,
 }
@@ -4195,6 +4255,8 @@ struct StepGameLoopAnalyzer<'a, 'e, E: ExecutionState<'e>> {
     inlining: bool,
     current_entry: Option<E::VirtualAddress>,
     inline_limit: u8,
+    screen_scroll_gate_candidate: Option<Operand<'e>>,
+    screen_scroll_gate_store_seen: bool,
 }
 
 impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for GameLoopAnalyzer<'a, 'e, E> {
@@ -4513,6 +4575,31 @@ impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for StepGameLoopAnaly
             StepGameLoopAnalysisState::NextGameStepTick => {
                 if let Operation::Jump { condition, to } = *op {
                     let condition = ctrl.resolve(condition);
+                    if self.result.update_screen_scrolling.is_none() {
+                        if let Some((gate, jump_if_pass)) = screen_scroll_gate(condition, ctx) {
+                            let pass_addr = match jump_if_pass {
+                                true => ctrl.resolve_va(to),
+                                false => Some(ctrl.current_instruction_end()),
+                            };
+                            if let Some(pass_addr) = pass_addr {
+                                self.state = StepGameLoopAnalysisState::ScreenScrollGate;
+                                self.screen_scroll_gate_candidate = Some(gate);
+                                self.screen_scroll_gate_store_seen = false;
+                                // Continue in the same function, keeping stack pointer as is
+                                let exec_state = ctrl.exec_state().clone();
+                                let mut analysis = FuncAnalysis::custom_state(
+                                    ctrl.binary(),
+                                    ctx,
+                                    pass_addr,
+                                    exec_state,
+                                    Default::default(),
+                                );
+                                analysis.analyze(self);
+                                self.state = StepGameLoopAnalysisState::NextGameStepTick;
+                            }
+                            return;
+                        }
+                    }
                     let result = condition.if_arithmetic_eq_neq_zero(ctx)
                         .and_then(|x| {
                             let (l, r) = x.0.if_arithmetic_and_const(0x8000_0000)?
@@ -4546,6 +4633,56 @@ impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for StepGameLoopAnaly
                     {
                         ctrl.skip_operation();
                     }
+                }
+            }
+            StepGameLoopAnalysisState::ScreenScrollGate => {
+                let Some(gate) = self.screen_scroll_gate_candidate else {
+                    ctrl.end_analysis();
+                    return;
+                };
+                match *op {
+                    Operation::Move(DestOperand::Memory(ref mem), value) => {
+                        // gate = 0 - current_tick
+                        let dest = ctrl.resolve_mem(mem);
+                        if dest.is_global() && ctx.memory(&dest) == gate {
+                            // Either `0 - now` or `(now ^ ffffffff) + 1`
+                            let value = ctrl.resolve(value).unwrap_and_mask();
+                            let negated = value.if_arithmetic_sub()
+                                .filter(|x| x.0 == ctx.const_0())
+                                .map(|x| x.1)
+                                .or_else(|| {
+                                    value.if_arithmetic_add_const(1)?
+                                        .if_arithmetic(ArithOpType::Xor)
+                                        .filter(|x| {
+                                            x.1.if_constant()
+                                                .is_some_and(|c| c as u32 == 0xffff_ffff)
+                                        })
+                                        .map(|x| x.0)
+                                });
+                            let is_negated_tick = negated
+                                .and_then(|x| Operand::and_masked(x).0.if_custom())
+                                .is_some();
+                            if is_negated_tick {
+                                self.screen_scroll_gate_store_seen = true;
+                            } else {
+                                ctrl.end_analysis();
+                            }
+                        }
+                    }
+                    Operation::Call(dest) => {
+                        if self.screen_scroll_gate_store_seen {
+                            if let Some(dest) = ctrl.resolve_va(dest) {
+                                self.result.update_screen_scrolling = Some(dest);
+                                self.result.screen_scroll_last_tick_negated = Some(gate);
+                            }
+                        }
+                        ctrl.end_analysis();
+                    }
+                    Operation::Jump { .. } => {
+                        // The store and call are expected to be right after the gate
+                        ctrl.end_analysis();
+                    }
+                    _ => (),
                 }
             }
             StepGameLoopAnalysisState::StepGame => {
@@ -4619,6 +4756,34 @@ impl<'a, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for StepGameLoopAnaly
             }
         }
     }
+}
+
+/// Checks for `(Mem32[gate] + current_tick) > 10` jump condition, where current_tick is
+/// a Custom call result.
+/// Returns (`Mem32[gate]`, true if the jump is taken when the comparison is true).
+fn screen_scroll_gate<'e>(
+    condition: Operand<'e>,
+    ctx: OperandCtx<'e>,
+) -> Option<(Operand<'e>, bool)> {
+    let (condition, is_eq_zero) = match condition.if_arithmetic_eq_neq_zero(ctx) {
+        Some((x, is_eq)) => (x, is_eq),
+        None => (condition, false),
+    };
+    let (l, r) = condition.if_arithmetic_gt()?;
+    // `x > 10` or `11 > x` (Same as `x <= 10`)
+    let (value, jump_if_gt) = if r.if_constant() == Some(0xa) {
+        (l, true)
+    } else if l.if_constant() == Some(0xb) {
+        (r, false)
+    } else {
+        return None;
+    };
+    let gate = value.unwrap_and_mask()
+        .if_arithmetic_add()
+        .and_either(|x| Operand::and_masked(x).0.if_custom())
+        .map(|x| x.1)
+        .filter(|x| x.if_mem32().is_some_and(|x| x.is_global()))?;
+    Some((gate, jump_if_gt != is_eq_zero))
 }
 
 // The native loop's continue_game_loop == 0 branch calls this cleanup instead of

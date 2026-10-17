@@ -324,6 +324,7 @@ step_hidden_unit_frame_outer_call: 005c05f3
 step_iscript: 00566f10
 step_iscript_switch: 00567d94
 step_lobby_network: 007325e0
+step_menu_cursor_animation: 0067a600
 step_moving_bullet_frame: 0055afc0
 step_network: 00722ce0
 step_objects: 006bd020
@@ -378,10 +379,14 @@ unlock_mission: 00781920
 update_attack_target: 00585540
 update_building_placement_state: 00665950
 update_cloak_state: 005b1120
+update_game_cursor: 0067cde0
 update_game_screen_size: 005fc6b0
 update_game_setting_bool: 0062d640
 update_game_setting_int: 00764540
+update_ingame_hud: 006bc3e0
+update_palette_cycles: 0091cba0
 update_screen_scroll_bounds: 006608c0
+update_screen_scrolling: 0075d0f0
 update_unit_visibility: 005c01b0
 update_visibility_point: 0056fa30
 active_bullet_count: Mem32[e65120]
@@ -430,6 +435,8 @@ current_sync_check_hash: Mem32[e73aec]
 current_sync_state_byte: Mem8[e732e5]
 current_sync_vision_bytes: e73af0
 current_tooltip_ctrl: Mem32[e740d0]
+cursor_animation_frame: Mem32[1035ee8]
+cursor_animation_next_tick: Mem32[1035eec]
 cursor_marker: Mem32[e73c54]
 cursor_scale_factor: Mem32[1035f00]
 dat_requirement_error: Mem32[eaf900]
@@ -586,6 +593,7 @@ order_timer_reset_counter: Mem32[e73da4]
 original_chk_player_types: 106f524
 outgoing_command_buffer: 1070f08
 outgoing_command_length: Mem32[1070f04]
+palette_cycle_last_tick: Mem32[104750c]
 palette_set: 10a3a10
 path_array: Mem32[107f7a4]
 pathing: Mem32[1076330]
@@ -626,6 +634,7 @@ rng_seed: Mem32[10722c0]
 run_dialog_stack: 10a68d8
 scmain_state: Mem32[104c60c]
 screen_scroll_bottom_padding_tiles: Mem16[eb5b88]
+screen_scroll_last_tick_negated: Mem32[10474b8]
 screen_scroll_max_x: Mem32[eb5b3c]
 screen_scroll_max_y: Mem32[eb5b40]
 screen_x: Mem32[eb5b78]
