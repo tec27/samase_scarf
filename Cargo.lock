@@ -159,7 +159,7 @@ dependencies = [
 [[package]]
 name = "scarf"
 version = "0.3.0"
-source = "git+https://github.com/neivv/scarf?rev=e859c8bc890304e74a3fcfc161feadc717260f4d#e859c8bc890304e74a3fcfc161feadc717260f4d"
+source = "git+https://github.com/neivv/scarf?rev=ebc73c2759d2aaeab6e66fe7884d6fa65b50cb2c#ebc73c2759d2aaeab6e66fe7884d6fa65b50cb2c"
 dependencies = [
  "array-init",
  "arrayvec",
