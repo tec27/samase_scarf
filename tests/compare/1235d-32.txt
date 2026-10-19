@@ -80,6 +80,7 @@ damage_unit: 005a4010
 decide_cursor_type: 0069f8f0
 deserialize_sprites: 00580960
 disable_unit: 005ce490
+dispatch_event_to_dialogs: 009acc10
 do_attack: 005a6470
 do_attack_main: 005a61f0
 do_missile_damage: 00565f20
@@ -235,6 +236,7 @@ prepare_issue_order: 005ba430
 print_text: 0072dc20
 process_async_lobby_command: 00742320
 process_commands: 00758590
+process_delayed_control_activations: 009acb10
 process_events: 006c3f20
 process_lobby_commands: 00758290
 push_renderer_mode_override: 00acd110
@@ -446,6 +448,7 @@ dcreep_lookup: 11d1a38
 dcreep_next_update: Mem32[11d2a74]
 dcreep_state_pool: 11cca38
 dcreep_unit_next_update: Mem32[11d2a78]
+delayed_control_activations: 11ed9a4
 dialog_return_code: Mem32[11ed814]
 disable_color_choice: fbde64
 draw_commands: 121ddc0

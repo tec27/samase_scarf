@@ -2779,3 +2779,203 @@ fn direct_byte_global_in<'e>(op: Operand<'e>) -> Option<Operand<'e>> {
         _ => None,
     }
 }
+
+pub(crate) struct DelayedControlActivations<'e, Va: VirtualAddress> {
+    pub dispatch_event_to_dialogs: Option<Va>,
+    pub process_delayed_control_activations: Option<Va>,
+    pub delayed_control_activations: Option<Operand<'e>>,
+}
+
+/// dispatch_event_to_dialogs is one of the functions using first_dialog, and calls
+/// process_delayed_control_activations, which is recognized from its body:
+///
+/// ```ignore
+/// now = GetTickCount();
+/// for entry in delayed_control_activations.iter_mut() {   // 4 entries
+///     let control = entry.control;
+///     if control != null && (entry.deadline - now) as i32 < 0 {
+///         entry.control = null;
+///         dispatch_control_extended_event(control, 3, 0, GetTickCount());
+///     }
+/// }
+/// ```
+///
+/// The first loop iteration is executed with constant addresses, so the store of 0 to
+/// `Mem[x]`, followed by a call with `(Mem[x], 3, 0)` gives the first entry's control field.
+/// The `Mem32` global in the sign check before that is the deadline field at the start of
+/// the entry, and it is required to be one word before the control field.
+pub(crate) fn analyze_delayed_control_activations<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    functions: &FunctionFinder<'_, 'e, E>,
+    first_dialog: Operand<'e>,
+) -> DelayedControlActivations<'e, E::VirtualAddress> {
+    let mut result = DelayedControlActivations {
+        dispatch_event_to_dialogs: None,
+        process_delayed_control_activations: None,
+        delayed_control_activations: None,
+    };
+    let first_dialog_addr = match first_dialog.if_memory().and_then(|x| x.if_constant_address()) {
+        Some(s) => E::VirtualAddress::from_u64(s),
+        None => return result,
+    };
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let mut refs = functions.find_functions_using_global(actx, first_dialog_addr);
+    refs.sort_unstable_by_key(|x| x.func_entry);
+    refs.dedup_by_key(|x| x.func_entry);
+    let funcs = functions.functions();
+    let mut checked_funcs = FxHashMap::default();
+    let mut found = None;
+    for global_ref in refs.iter() {
+        let val = entry_of_until(binary, &funcs, global_ref.use_address, |entry| {
+            let mut analyzer = FindDelayedActivationsPollCaller::<E> {
+                actx,
+                checked_funcs: &mut checked_funcs,
+                use_address: global_ref.use_address,
+                use_address_seen: false,
+                result: None,
+            };
+            let mut analysis = FuncAnalysis::new(binary, ctx, entry);
+            analysis.analyze(&mut analyzer);
+            match (analyzer.result, analyzer.use_address_seen) {
+                (Some(s), true) => EntryOf::Ok(s),
+                (_, true) => EntryOf::Stop,
+                (_, false) => EntryOf::Retry,
+            }
+        }).into_option_with_entry();
+        let val = val.map(|(entry, (poll, deadline))| (entry, poll, deadline));
+        if single_result_assign(val, &mut found) {
+            break;
+        }
+    }
+    if let Some((dispatch, poll, deadline)) = found {
+        result.dispatch_event_to_dialogs = Some(dispatch);
+        result.process_delayed_control_activations = Some(poll);
+        result.delayed_control_activations = Some(deadline);
+    }
+    result
+}
+
+struct FindDelayedActivationsPollCaller<'a, 'acx, 'e, E: ExecutionState<'e>> {
+    actx: &'acx AnalysisCtx<'e, E>,
+    checked_funcs: &'a mut FxHashMap<E::VirtualAddress, Option<Operand<'e>>>,
+    use_address: E::VirtualAddress,
+    use_address_seen: bool,
+    result: Option<(E::VirtualAddress, Operand<'e>)>,
+}
+
+impl<'a, 'acx, 'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for
+    FindDelayedActivationsPollCaller<'a, 'acx, 'e, E>
+{
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        if !self.use_address_seen && ctrl.instruction_contains_address(self.use_address) {
+            self.use_address_seen = true;
+        }
+        if self.result.is_some() {
+            if self.use_address_seen {
+                ctrl.end_analysis();
+            }
+            return;
+        }
+        if let Operation::Call(dest) = *op {
+            if let Some(dest) = ctrl.resolve_va(dest) {
+                let actx = self.actx;
+                let deadline = *self.checked_funcs.entry(dest)
+                    .or_insert_with(|| delayed_activations_poll_deadline(actx, dest));
+                if let Some(deadline) = deadline {
+                    self.result = Some((dest, deadline));
+                    if self.use_address_seen {
+                        ctrl.end_analysis();
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Returns address of the first entry of delayed_control_activations if `func` is
+/// process_delayed_control_activations.
+fn delayed_activations_poll_deadline<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    func: E::VirtualAddress,
+) -> Option<Operand<'e>> {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let mut analyzer = DelayedActivationsPollAnalyzer::<E> {
+        result: None,
+        call_count: 0,
+        deadline_candidate: None,
+        cleared_control: None,
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, func);
+    analysis.analyze(&mut analyzer);
+    analyzer.result
+}
+
+struct DelayedActivationsPollAnalyzer<'e, E: ExecutionState<'e>> {
+    result: Option<Operand<'e>>,
+    call_count: u32,
+    /// `x` of the last `(Mem32[x] - y) as i32 >= 0` jump condition.
+    deadline_candidate: Option<u64>,
+    /// Constant address that was set to 0 with a word-sized store.
+    cleared_control: Option<u64>,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'e, E: ExecutionState<'e>> analysis::Analyzer<'e> for DelayedActivationsPollAnalyzer<'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        match *op {
+            Operation::Jump { condition, .. } => {
+                // ((Mem32[deadline] - now) & 8000_0000) == 0
+                let ctx = ctrl.ctx();
+                let condition = ctrl.resolve(condition);
+                let deadline = condition.if_arithmetic_eq_neq_zero(ctx)
+                    .and_then(|x| x.0.if_arithmetic_and_const(0x8000_0000))
+                    .and_then(|x| x.if_arithmetic_sub())
+                    .and_then(|x| x.0.if_memory())
+                    .filter(|mem| mem.size == MemAccessSize::Mem32)
+                    .and_then(|mem| mem.if_constant_address());
+                if deadline.is_some() {
+                    self.deadline_candidate = deadline;
+                }
+            }
+            Operation::Move(DestOperand::Memory(ref mem), value) => {
+                if mem.size == E::WORD_SIZE && ctrl.resolve(value) == ctrl.ctx().const_0() {
+                    let mem = ctrl.resolve_mem(mem);
+                    if let Some(addr) = mem.if_constant_address() {
+                        self.cleared_control = Some(addr);
+                    }
+                }
+            }
+            Operation::Call(..) => {
+                self.call_count += 1;
+                if let Some(control) = self.cleared_control {
+                    let arg1 = ctrl.resolve_arg(0);
+                    let ok = ctrl.resolve_arg_u32(1).if_constant() == Some(3) &&
+                        ctrl.resolve_arg_u32(2) == ctrl.ctx().const_0() &&
+                        ctrl.if_mem_word(arg1)
+                            .and_then(|mem| mem.if_constant_address()) == Some(control);
+                    if ok {
+                        if let Some(deadline) = self.deadline_candidate {
+                            // u32 deadline, padded to word size, followed by the control
+                            if deadline.wrapping_add(E::VirtualAddress::SIZE as u64) == control {
+                                self.result = Some(ctrl.ctx().constant(deadline));
+                            }
+                        }
+                        ctrl.end_analysis();
+                        return;
+                    }
+                }
+                if self.call_count > 4 {
+                    ctrl.end_analysis();
+                }
+            }
+            _ => (),
+        }
+    }
+}

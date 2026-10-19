@@ -763,6 +763,16 @@ results! {
         // () -> (); steps the tileset palette color cycles and marks the palette as
         // needing update. Called by update_ingame_hud when palette_cycle_last_tick allows it.
         UpdatePaletteCycles => update_palette_cycles => cache_palette_cycles,
+        // a1 ControlEvent *; returns nonzero if a control handled the event.
+        // Sends the event to the control capturing that event type, or walks first_dialog
+        // list until a dialog handles it. Calls process_delayed_control_activations
+        // before and after dispatching.
+        DispatchEventToDialogs => dispatch_event_to_dialogs =>
+            cache_delayed_control_activations,
+        // () -> (); activates controls whose delayed_control_activations deadline has passed,
+        // by clearing the entry and sending extended event 3 to the control.
+        ProcessDelayedControlActivations => process_delayed_control_activations =>
+            cache_delayed_control_activations,
     }
 }
 
@@ -1257,6 +1267,14 @@ results! {
         //      update_palette_cycles();
         //  }
         PaletteCycleLastTick => palette_cycle_last_tick => cache_palette_cycles,
+        // struct { u32 deadline; Control *control; }[4]; (deadline padded to word size)
+        // Pending control activations from hotkey presses. A hotkey only marks the button
+        // pressed and stores `{ event_time + 20, control }` (+ 30 on some older builds)
+        // to a free entry; process_delayed_control_activations activates the control once
+        // (deadline - GetTickCount()) as i32 < 0. Entries with null control are free.
+        // Points to the deadline of the first entry.
+        DelayedControlActivations => delayed_control_activations =>
+            cache_delayed_control_activations,
     }
 }
 
@@ -5920,6 +5938,31 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
                 let run_dialog = s.run_dialog(actx)?;
                 let r = dialog::analyze_run_dialog(actx, run_dialog);
                 Some(([r.ctrl_set_timer], [r.first_dialog, r.run_dialog_stack]))
+            })
+    }
+
+    fn first_dialog(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<Operand<'e>> {
+        self.cache_many_op(OperandAnalysis::FirstDialog, |s| s.cache_run_dialog_children(actx))
+    }
+
+    fn cache_delayed_control_activations(&mut self, actx: &AnalysisCtx<'e, E>) {
+        use AddressAnalysis::*;
+        use OperandAnalysis::*;
+        self.cache_many(
+            &[DispatchEventToDialogs, ProcessDelayedControlActivations],
+            &[DelayedControlActivations],
+            |s| {
+                let first_dialog = s.first_dialog(actx)?;
+                let functions = s.function_finder();
+                let r = dialog::analyze_delayed_control_activations(
+                    actx,
+                    &functions,
+                    first_dialog,
+                );
+                Some((
+                    [r.dispatch_event_to_dialogs, r.process_delayed_control_activations],
+                    [r.delayed_control_activations],
+                ))
             })
     }
 

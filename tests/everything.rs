@@ -1762,7 +1762,7 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 DcreepStatePool | PlayerTriggerLists | PlayerTriggerWaitActiveFlags |
                 PlayerTriggerWaitTimers | PlayerTriggerVictoryStates | PlayerTriggerActiveFlags |
                 CachedMineralCosts | CachedGasCosts | CachedSupplyCosts | GameSettingGroups |
-                StatTxtStringTable | UnitMapNameOverrides =>
+                StatTxtStringTable | UnitMapNameOverrides | DelayedControlActivations =>
             {
                 check_global_struct_opt(result, binary, op.name());
             }
