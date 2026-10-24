@@ -386,6 +386,7 @@ update_game_screen_size: 005bd7d0
 update_game_setting_bool: None
 update_game_setting_int: None
 update_ingame_hud: 00655180
+update_minimap_dialog_horizontal_offset: 00689c20
 update_palette_cycles: 0089bd20
 update_screen_scroll_bounds: 00608850
 update_screen_scrolling: 006e40a0

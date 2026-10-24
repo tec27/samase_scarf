@@ -1,3 +1,5 @@
+use bumpalo::collections::Vec as BumpVec;
+
 use scarf::analysis::{self, Control, FuncAnalysis};
 use scarf::exec_state::{ExecutionState, VirtualAddress};
 use scarf::{DestOperand, MemAccessSize, Operand, Operation};
@@ -15,6 +17,7 @@ pub(crate) struct EventHandler<'e, E: ExecutionState<'e>> {
     pub minimap_dialog_event_handler: Option<E::VirtualAddress>,
     pub minimap_color_mode: Option<Operand<'e>>,
     pub minimap_terrain_hidden: Option<Operand<'e>>,
+    pub update_minimap_dialog_horizontal_offset: Option<E::VirtualAddress>,
 }
 
 pub(crate) fn unexplored_fog_minimap_patch<'e, E: ExecutionState<'e>>(
@@ -572,14 +575,21 @@ pub(crate) fn analyze_event_handler<'e, E: ExecutionState<'e>>(
         minimap_dialog_event_handler: None,
         minimap_color_mode: None,
         minimap_terrain_hidden: None,
+        update_minimap_dialog_horizontal_offset: None,
     };
-    let event_handler = crate::dialog::run_dialog_analysis(
+    let run_dialog = crate::dialog::run_dialog_analysis(
         actx,
         functions,
         b"rez\\minimap",
         b"minimap.ui",
-    ).event_handler;
-    let event_handler = match event_handler {
+    );
+    if let (Some(parent), Some(spawn_dialog)) =
+        (run_dialog.parent_function, run_dialog.run_dialog)
+    {
+        result.update_minimap_dialog_horizontal_offset =
+            update_minimap_dialog_horizontal_offset(actx, parent, spawn_dialog);
+    }
+    let event_handler = match run_dialog.event_handler {
         Some(s) => s,
         None => return result,
     };
@@ -633,6 +643,174 @@ impl<'a, 'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for EventHandlerAnalyzer
             {
                 ctrl.end_analysis();
             }
+        }
+    }
+}
+
+/// Finds the function that minimap dialog init registers to be called when widescreen
+/// UI expansion changes:
+///
+/// minimap_dialog = load_dialog("rez\\minimap.ui");
+/// spawn_dialog(minimap_dialog, 0, minimap_dialog_event_handler);
+/// apply_widescreen_ui_expansion(function<void(bool)>(update_minimap_dialog_horizontal_offset));
+///
+/// The callback is stored as a constant to the function object after spawn_dialog call;
+/// a constant is accepted if the function it points to adjusts both left and right of a
+/// global dialog's area by a function return value (negated get_widescreen_horizontal_margin).
+fn update_minimap_dialog_horizontal_offset<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    parent: E::VirtualAddress,
+    spawn_dialog: E::VirtualAddress,
+) -> Option<E::VirtualAddress> {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let mut analyzer = FindMinimapOffsetCallback::<E> {
+        actx,
+        spawn_dialog,
+        spawn_dialog_seen: false,
+        checked: bumpvec_with_capacity(8, &actx.bump),
+        result: None,
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, parent);
+    analysis.analyze(&mut analyzer);
+    analyzer.result
+}
+
+struct FindMinimapOffsetCallback<'acx, 'e, E: ExecutionState<'e>> {
+    actx: &'acx AnalysisCtx<'e, E>,
+    spawn_dialog: E::VirtualAddress,
+    spawn_dialog_seen: bool,
+    checked: BumpVec<'acx, E::VirtualAddress>,
+    result: Option<E::VirtualAddress>,
+}
+
+impl<'acx, 'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for
+    FindMinimapOffsetCallback<'acx, 'e, E>
+{
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        match *op {
+            Operation::Call(dest) => {
+                if !self.spawn_dialog_seen {
+                    if ctrl.resolve_va(dest) == Some(self.spawn_dialog) {
+                        self.spawn_dialog_seen = true;
+                    }
+                }
+            }
+            Operation::Move(_, value) if self.spawn_dialog_seen => {
+                let text = self.actx.binary_sections.text;
+                let text_end = text.virtual_address + text.virtual_size;
+                let func = match ctrl.resolve_va(value) {
+                    Some(s) if s >= text.virtual_address && s < text_end => s,
+                    _ => return,
+                };
+                if self.checked.contains(&func) {
+                    return;
+                }
+                if self.checked.len() >= 8 {
+                    ctrl.end_analysis();
+                    return;
+                }
+                self.checked.push(func);
+                if is_minimap_offset_callback(self.actx, func) {
+                    self.result = Some(func);
+                    ctrl.end_analysis();
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
+fn is_minimap_offset_callback<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    func: E::VirtualAddress,
+) -> bool {
+    let binary = actx.binary;
+    let ctx = actx.ctx;
+    let mut analyzer = MinimapOffsetCallbackAnalyzer::<E> {
+        dialog: None,
+        left_adjusted: false,
+        right_adjusted: false,
+        phantom: Default::default(),
+    };
+    let mut analysis = FuncAnalysis::new(binary, ctx, func);
+    analysis.analyze(&mut analyzer);
+    analyzer.left_adjusted && analyzer.right_adjusted
+}
+
+struct MinimapOffsetCallbackAnalyzer<'e, E: ExecutionState<'e>> {
+    dialog: Option<Operand<'e>>,
+    left_adjusted: bool,
+    right_adjusted: bool,
+    phantom: std::marker::PhantomData<(*const E, &'e ())>,
+}
+
+impl<'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for MinimapOffsetCallbackAnalyzer<'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        // When expanding, offset = -get_widescreen_horizontal_margin(); and both
+        // `minimap_dialog->area.left` and `.right` get `- old_offset + offset` applied.
+        // The margin call result is custom(0); writes containing it and the old field
+        // value are the adjustments.
+        let ctx = ctrl.ctx();
+        match *op {
+            Operation::Call(..) => {
+                ctrl.do_call_with_result(ctx.custom(0));
+            }
+            Operation::Jump { condition, .. } => {
+                if condition == ctx.const_1() && ctrl.resolve_register(4) == ctx.register(4) {
+                    // Tail call
+                    ctrl.end_branch();
+                }
+            }
+            Operation::Move(DestOperand::Memory(ref mem), value)
+                if mem.size == MemAccessSize::Mem16 =>
+            {
+                let dest = ctrl.resolve_mem(mem);
+                let (base, offset) = dest.address();
+                let is_global_dialog = base.if_memory()
+                    .filter(|x| x.size == E::WORD_SIZE)
+                    .and_then(|x| x.if_constant_address())
+                    .is_some();
+                if !is_global_dialog {
+                    return;
+                }
+                if let Some(dialog) = self.dialog {
+                    if dialog != base {
+                        return;
+                    }
+                }
+                let layouts = E::struct_layouts();
+                let is_left = offset == layouts.control_left();
+                let is_right = offset == layouts.control_right();
+                if !is_left && !is_right {
+                    return;
+                }
+                let value = ctrl.resolve(value);
+                let old = ctx.memory(&dest);
+                let custom = ctx.custom(0);
+                let mut has_old = false;
+                let mut has_custom = false;
+                for x in value.iter() {
+                    has_old |= x == old;
+                    has_custom |= x == custom;
+                }
+                if has_old && has_custom {
+                    self.dialog = Some(base);
+                    if is_left {
+                        self.left_adjusted = true;
+                    } else {
+                        self.right_adjusted = true;
+                    }
+                    if self.left_adjusted && self.right_adjusted {
+                        ctrl.end_analysis();
+                    }
+                }
+            }
+            _ => (),
         }
     }
 }

@@ -773,6 +773,11 @@ results! {
         // by clearing the entry and sending extended event 3 to the control.
         ProcessDelayedControlActivations => process_delayed_control_activations =>
             cache_delayed_control_activations,
+        // a1 bool expand; () Shifts the minimap dialog left by the widescreen margin when
+        // expand, or back when not. Registered with apply_widescreen_ui_expansion by
+        // minimap dialog init, which also calls it immediately.
+        UpdateMinimapDialogHorizontalOffset => update_minimap_dialog_horizontal_offset =>
+            cache_minimap_event_handler,
     }
 }
 
@@ -6547,16 +6552,16 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
     }
 
     fn cache_minimap_event_handler(&mut self, actx: &AnalysisCtx<'e, E>) {
-        use AddressAnalysis::MinimapDialogEventHandler;
+        use AddressAnalysis::{MinimapDialogEventHandler, UpdateMinimapDialogHorizontalOffset};
         use OperandAnalysis::{MinimapColorMode, MinimapTerrainHidden};
         self.cache_many(
-            &[MinimapDialogEventHandler],
+            &[MinimapDialogEventHandler, UpdateMinimapDialogHorizontalOffset],
             &[MinimapColorMode, MinimapTerrainHidden],
             |s| {
                 let funcs = s.function_finder();
                 let r = minimap::analyze_event_handler(actx, &funcs);
                 Some((
-                    [r.minimap_dialog_event_handler],
+                    [r.minimap_dialog_event_handler, r.update_minimap_dialog_horizontal_offset],
                     [r.minimap_color_mode, r.minimap_terrain_hidden],
                 ))
             })

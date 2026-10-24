@@ -383,6 +383,16 @@ impl StructLayouts {
         self.pair(0x40, 0x58)
     }
 
+    /// i16 left of Control area rect
+    pub const fn control_left(self) -> u64 {
+        self.pair(0x4, 0x8)
+    }
+
+    /// i16 right of Control area rect
+    pub const fn control_right(self) -> u64 {
+        self.pair(0x8, 0xc)
+    }
+
     pub const fn order_id(self) -> u64 {
         self.pair(0x8, 0x10)
     }
