@@ -659,6 +659,7 @@ sprite_hlines: dfebc8
 sprite_hlines_end: dfefc8
 sprite_include_in_vision_sync: dfe8b0
 sprite_skin_map: d9d7e4
+sprite_unit_map: d9d780
 sprites: Mem32[dfebb8]
 stat_txt_string_table: None
 statport_talking_portrait_active: Mem32[1006428]

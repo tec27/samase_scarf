@@ -659,6 +659,7 @@ sprite_hlines: ff7740
 sprite_hlines_end: ff7b40
 sprite_include_in_vision_sync: ff7428
 sprite_skin_map: f4ee10
+sprite_unit_map: f4ece8
 sprites: Mem32[ff7730]
 stat_txt_string_table: 1206de8
 statport_talking_portrait_active: Mem32[1206c9c]

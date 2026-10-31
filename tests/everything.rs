@@ -1749,7 +1749,7 @@ fn test_nongeneric<'e, E: ExecutionState<'e>>(
                 PlayerSkins | ClientSelection | BaseAnimSet | ImageGrps | ImageOverlays |
                 FireOverlayMax | NetPlayerFlags | PlayerTurns | PlayerTurnsSize | CmdIconsDdsGrp |
                 CmdBtnsDdsGrp | SyncData | PaletteSet | MainPalette | TfontGam |
-                UnitSkinMap | SpriteSkinMap | GrpWireDdsGrp | TranWireDdsGrp |
+                UnitSkinMap | SpriteSkinMap | SpriteUnitMap | GrpWireDdsGrp | TranWireDdsGrp |
                 SpriteIncludeInVisionSync | DrawCommands | CreepFuncs | DcreepLookup |
                 DcreepListBegin | DcreepListSize | ReplayHeader | GameScreenRectWinPx |
                 RunDialogStack | LurkerHits | ResourceAreas | HpBarImages | HpBarState |

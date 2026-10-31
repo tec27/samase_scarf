@@ -659,6 +659,7 @@ sprite_hlines: df1090
 sprite_hlines_end: df1490
 sprite_include_in_vision_sync: df0d78
 sprite_skin_map: d5ccb4
+sprite_unit_map: d5cc50
 sprites: Mem32[df1080]
 stat_txt_string_table: None
 statport_talking_portrait_active: Mem32[ffee88]

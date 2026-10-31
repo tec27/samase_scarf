@@ -1058,3 +1058,102 @@ impl<'a, 'acx, 'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for
         }
     }
 }
+
+/// Finds the sprite-to-unit association map cleared before the sprite pool is initialized.
+pub(crate) fn sprite_unit_map<'e, E: ExecutionState<'e>>(
+    actx: &AnalysisCtx<'e, E>,
+    init_sprites: E::VirtualAddress,
+) -> Option<Operand<'e>> {
+    let mut analyzer = SpriteUnitMapAnalyzer::<E> {
+        candidate: None,
+        zero_count: false,
+        zero_bucket: false,
+        result: None,
+        inlining: false,
+        getter: false,
+        getter_result: None,
+        first_call: true,
+        _exec: std::marker::PhantomData,
+    };
+    let mut analysis = FuncAnalysis::new(actx.binary, actx.ctx, init_sprites);
+    analysis.analyze(&mut analyzer);
+    analyzer.result
+}
+
+struct SpriteUnitMapAnalyzer<'e, E: ExecutionState<'e>> {
+    candidate: Option<Operand<'e>>,
+    zero_count: bool,
+    zero_bucket: bool,
+    result: Option<Operand<'e>>,
+    inlining: bool,
+    getter: bool,
+    getter_result: Option<Operand<'e>>,
+    first_call: bool,
+    _exec: std::marker::PhantomData<E>,
+}
+
+impl<'e, E: ExecutionState<'e>> scarf::Analyzer<'e> for SpriteUnitMapAnalyzer<'e, E> {
+    type State = analysis::DefaultState;
+    type Exec = E;
+
+    fn operation(&mut self, ctrl: &mut Control<'e, '_, '_, Self>, op: &Operation<'e>) {
+        match *op {
+            Operation::Call(to) if !self.inlining => {
+                let map = ctrl.resolve_register(1);
+                if self.first_call {
+                    self.first_call = false;
+                    if let Some(dest) = ctrl.resolve_va(to) {
+                        self.inlining = true;
+                        self.getter = true;
+                        ctrl.analyze_with_current_state(self, dest);
+                        self.getter = false;
+                        self.inlining = false;
+                        if let Some(result) = self.getter_result {
+                            ctrl.do_call_with_result(result);
+                            return;
+                        }
+                    }
+                }
+                if Some(map) != self.getter_result || !crate::util::is_global_struct::<E>(map) {
+                    return;
+                }
+                if let Some(dest) = ctrl.resolve_va(to) {
+                    self.candidate = Some(map);
+                    self.zero_count = false;
+                    self.zero_bucket = false;
+                    self.inlining = true;
+                    ctrl.analyze_with_current_state(self, dest);
+                    self.inlining = false;
+                    if self.zero_count && self.zero_bucket {
+                        single_result_assign(Some(map), &mut self.result);
+                        ctrl.end_analysis();
+                    }
+                    self.candidate = None;
+                }
+            }
+            Operation::Return(..) if self.getter => {
+                let result = ctrl.resolve(ctrl.ctx().register(0));
+                if result.if_constant().is_some_and(|x| x > 0x1000) {
+                    single_result_assign(Some(result), &mut self.getter_result);
+                }
+            }
+            Operation::Move(DestOperand::Memory(ref dest), value) if self.inlining && !self.getter => {
+                if dest.size != E::WORD_SIZE || ctrl.resolve(value).if_constant() != Some(0) {
+                    return;
+                }
+                let map = self.candidate.unwrap();
+                let ctx = ctrl.ctx();
+                let dest = ctrl.resolve_mem(dest).address_op(ctx);
+                let word = E::VirtualAddress::SIZE as u64;
+                if dest == ctx.add_const(map, 2 * word) {
+                    self.zero_count = true;
+                }
+                let buckets = ctx.memory(&ctx.mem_access(map, word, E::WORD_SIZE));
+                if dest.iter().any(|x| x == buckets) {
+                    self.zero_bucket = true;
+                }
+            }
+            _ => (),
+        }
+    }
+}

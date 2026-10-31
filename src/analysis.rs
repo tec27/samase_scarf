@@ -850,6 +850,7 @@ results! {
         FirstFreeFowSprite => first_free_fow_sprite => cache_fow_sprites,
         LastFreeFowSprite => last_free_fow_sprite => cache_fow_sprites,
         Sprites => sprites => cache_init_sprites,
+        SpriteUnitMap => sprite_unit_map => cache_sprite_unit_map,
         FirstActiveUnit => first_active_unit => cache_active_hidden_units,
         FirstHiddenUnit => first_hidden_unit => cache_active_hidden_units,
         MapTileFlags => map_tile_flags => cache_map_tile_flags,
@@ -3571,6 +3572,13 @@ impl<'e, E: ExecutionState<'e>> AnalysisCache<'e, E> {
 
     fn init_sprites(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<E::VirtualAddress> {
         self.cache_many_addr(AddressAnalysis::InitSprites, |s| s.cache_init_sprites(actx))
+    }
+
+    fn cache_sprite_unit_map(&mut self, actx: &AnalysisCtx<'e, E>) {
+        self.cache_many(&[], &[OperandAnalysis::SpriteUnitMap], |s| {
+            let init_sprites = s.init_sprites(actx)?;
+            Some(([], [sprites::sprite_unit_map(actx, init_sprites)]))
+        });
     }
 
     fn sprite_array(&mut self, actx: &AnalysisCtx<'e, E>) -> Option<(Operand<'e>, u32)> {
